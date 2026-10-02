@@ -1,0 +1,18 @@
+[
+  {
+    "query": "2026年以来国内AI教育行业有哪些重大进展？结合市场格局分析当前投资价值",
+    "source": "web",
+    "content": "[来源：https://www.ageclub.net/article-detail/9229 | 标题：中投顾问-2026年人工智能（AI）产业深度分析报告 - AgeClub]\n图表1：2025-2027年全球AI市场规模及支出结构。图表2：2026年全球企业AI部署成熟度。图表3：2024-2035年中国AI核心产业规模及增长趋势。数据来源：QuestMobile《2025年AI应用层发展核心报告》、中投产业研究院整理。",
+    "score": 0.31,
+    "metadata": {"url": "https://www.ageclub.net/article-detail/9229", "title": "中投顾问-2026年人工智能(AI)产业深度分析报告", "published_date": null, "industry": "unknown"},
+    "iteration": 1
+  },
+  {
+    "query": "2026年以来国内AI教育行业有哪些重大进展？结合市场格局分析当前投资价值",
+    "source": "web",
+    "content": "2025年中国在线少儿英语培训行业报告显示，行业整体获客成本持续上升，头部机构如VIPKID、51Talk面临用户增长放缓压力，部分中小机构选择转型线下小班课模式以降低运营成本。",
+    "score": 0.24,
+    "metadata": {"url": "https://example.com/news/online-english-training-2025", "title": "2025年在线少儿英语培训行业报告", "published_date": "2025-11-20", "industry": "教育"},
+    "iteration": 1
+  }
+]

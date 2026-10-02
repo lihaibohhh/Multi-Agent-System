@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Multi-Agent Research System</title>
+  <link rel="stylesheet" href="/static/styles.css">
+  <script defer src="https://cdnjs.cloudflare.com/ajax/libs/marked/9.1.6/marked.min.js"></script>
+  <script defer src="/static/app.js"></script>
+</head>
+<body>
+  <div class="app-shell">
+    <header class="app-header">
+      <div class="brand">
+        <div class="brand-mark">🔬</div>
+        <div>
+          <h1>Multi-Agent Research System</h1>
+          <p class="subtitle">LangGraph · Supervisor · Search · Analyst · Writer</p>
+        </div>
+      </div>
+      <div class="health" id="health">
+        <span class="health-dot"></span>
+        <span id="health-text">正在检查服务</span>
+      </div>
+    </header>
+
+    <main class="workspace">
+      <aside class="sidebar">
+        <section class="card"><div class="card-body">
+          <div class="card-title-row">
+            <h2 class="card-title">Research Session</h2>
+            <button class="btn btn-ghost" id="new-session-btn">新建</button>
+          </div>
+          <div class="field">
+            <label for="session-id">Session ID</label>
+            <div class="field-row">
+              <input id="session-id" type="text" placeholder="输入 Session ID">
+              <button class="btn btn-secondary" id="load-session-btn">加载</button>
+            </div>
+            <p class="hint" id="session-title">尚未选择 Session</p>
+          </div>
+          <div class="card-title-row" style="margin-top: 20px">
+            <h3 class="card-title">Run Tree</h3>
+            <span class="hint" id="run-count">0 runs</span>
+          </div>
+          <div class="run-tree" id="run-tree">
+            <div class="tree-empty">创建任务后，父子 Run 将在这里展示。</div>
+          </div>
+        </div></section>
+
+        <section class="card"><div class="card-body">
+          <div class="card-title-row">
+            <h2 class="card-title">Research Task</h2>
+            <div class="report-actions">
+              <span class="badge" id="run-status">draft</span>
+              <button class="btn btn-ghost" id="new-run-btn">空白 Run</button>
+            </div>
+          </div>
+          <div class="field">
+            <label for="question">问题</label>
+            <textarea id="question" maxlength="500" placeholder="输入研究问题…">结合现有资料，分析当前AI教育行业的主要机会、风险与未来12个月值得关注的指标。</textarea>
+          </div>
+          <div class="field">
+            <label for="parent-run-id">继承自 Run</label>
+            <div class="field-row">
+              <input id="parent-run-id" type="text" placeholder="可选：已完成的父 Run">
+              <button class="btn btn-ghost" id="clear-parent-btn" title="清除父 Run">清除</button>
+            </div>
+          </div>
+          <div class="field">
+            <label for="run-id">当前 Run ID</label>
+            <input id="run-id" type="text" placeholder="创建后由服务端生成" readonly>
+          </div>
+          <div class="button-row">
+            <button class="btn btn-primary" id="start-btn">▶ 创建并启动</button>
+            <button class="btn btn-primary hidden" id="start-existing-btn">▶ 启动当前 Run</button>
+            <button class="btn btn-secondary hidden" id="continue-btn">↳ 基于此 Run 继续</button>
+            <button class="btn btn-warning hidden" id="resume-btn">↻ 从 Checkpoint 恢复</button>
+          </div>
+          <div class="notice" id="notice"></div>
+        </div></section>
+
+        <section class="card"><div class="card-body">
+          <div class="card-title-row">
+            <h2 class="card-title">Agent Pipeline</h2>
+            <span class="hint" id="event-cursor">event #0</span>
+          </div>
+          <div class="pipeline">
+            <article class="agent" id="agent-supervisor">
+              <div class="agent-name">🎯 Supervisor</div>
+              <div class="agent-detail" id="meta-supervisor">任务分解与路由决策</div>
+            </article>
+            <article class="agent" id="agent-search">
+              <div class="agent-name">🔍 Search</div>
+              <div class="agent-detail" id="meta-search">knowledge-service · Tavily</div>
+            </article>
+            <article class="agent" id="agent-analyst">
+              <div class="agent-name">🔬 Analyst</div>
+              <div class="agent-detail" id="meta-analyst">证据完整性审查</div>
+            </article>
+            <article class="agent" id="agent-writer">
+              <div class="agent-name">✍️ Writer</div>
+              <div class="agent-detail" id="meta-writer">结构化报告生成</div>
+            </article>
+          </div>
+          <div class="event-log" id="event-log" aria-live="polite"></div>
+        </div></section>
+      </aside>
+
+      <section class="card report-card">
+        <div class="report-header">
+          <div>
+            <h2 id="report-title">研究报告</h2>
+            <p class="hint" id="report-subtitle">选择历史 Run 或启动新任务。</p>
+          </div>
+          <div class="report-actions">
+            <button class="btn btn-ghost hidden" id="use-as-parent-btn">基于此继续</button>
+            <button class="btn btn-ghost hidden" id="copy-btn">复制</button>
+          </div>
+        </div>
+        <div class="stats hidden" id="stats">
+          <div class="stat">迭代轮次<strong id="stat-iterations">—</strong></div>
+          <div class="stat">章节证据条目（含复用）<strong id="stat-results">—</strong></div>
+          <div class="stat">实际引用<strong id="stat-citations">—</strong></div>
+          <div class="stat">报告字数<strong id="stat-chars">—</strong></div>
+          <div class="stat">已报告 Token<strong id="stat-tokens">—</strong></div>
+        </div>
+        <div class="card-body hidden" id="sections-panel">
+          <h3>章节进度与草稿</h3>
+          <p class="hint">草稿中的来源编号为本章编号；最终报告会统一编号。审校受限章节会保留局限说明。</p>
+          <div id="sections-list"></div>
+        </div>
+        <div class="report-placeholder" id="report-empty"><div>
+          <div class="report-placeholder-icon">◇</div>
+          <h3>尚无报告</h3>
+          <p>创建新任务，或从左侧 Run Tree 打开历史报告。</p>
+        </div></div>
+        <article class="report hidden" id="report-content"></article>
+      </section>
+    </main>
+  </div>
+</body>
+</html>
