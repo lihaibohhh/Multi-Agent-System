@@ -252,6 +252,14 @@ class AgentConfig(BaseSettings):
     section_max_search_rounds: int = Field(default=2, ge=1, le=4)
     section_max_revisions: int = Field(default=1, ge=0, le=3)
 
+    run_max_model_calls: int = Field(default=80, gt=0, le=1000)
+    run_max_tokens: int = Field(default=800_000, gt=0)
+    run_max_retrieval_calls: int = Field(default=80, gt=0, le=1000)
+    run_timeout: float = Field(default=3600, gt=0, description="每次执行的时限；恢复重新计时，累计调用额度不重置")
+    model_call_timeout: float = Field(default=120, gt=0)
+    retrieval_call_timeout: float = Field(default=60, gt=0)
+    retrieval_concurrency: int = Field(default=4, ge=1, le=32)
+
     enable_checkpointing: bool = Field(default=True, validation_alias="LANGGRAPH_CHECKPOINTING")
     recursion_limit:      int = Field(default=25, gt=0, validation_alias="LANGGRAPH_RECURSION_LIMIT")
     checkpoint_backend:   str = Field(default="memory", validation_alias="CHECKPOINT_BACKEND",

@@ -62,7 +62,7 @@ def _build_openai(model_name: str) -> BaseChatModel:
         temperature=cfg.temperature,
         max_tokens=cfg.max_tokens,
         timeout=cfg.timeout,
-        max_retries=cfg.retries,
+        max_retries=0,  # Each external attempt must pass the Run budget gate.
         # langchain_openai 会自动读取 OPENAI_API_KEY 环境变量
         # load_dotenv 已在 config.py 里写入 os.environ，此处无需显式传递
     )
@@ -79,7 +79,7 @@ def _build_anthropic(model_name: str) -> BaseChatModel:
         temperature=cfg.temperature,
         max_tokens=cfg.max_tokens,
         timeout=cfg.timeout,
-        max_retries=cfg.retries,
+        max_retries=0,
     )
 
 
@@ -98,7 +98,7 @@ def _build_local_openai_compatible(model_name: str) -> BaseChatModel:
         temperature=cfg.temperature,
         max_tokens=cfg.max_tokens,
         timeout=cfg.timeout,
-        max_retries=cfg.retries,
+        max_retries=0,
     )
 
 
@@ -117,7 +117,7 @@ def _build_deepseek_openai_compatible(model_name: str) -> BaseChatModel:
         temperature=cfg.temperature,
         max_tokens=cfg.max_tokens,
         timeout=cfg.timeout,
-        max_retries=cfg.retries,
+        max_retries=0,
     )
 
 

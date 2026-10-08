@@ -20,6 +20,7 @@ from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 
 from ..core.state import ResearchState, format_parent_context
 from ..utils.llm import load_chat_model
+from ..core.budget import RunControlError, invoke_model
 
 logger = logging.getLogger(__name__)
 
@@ -232,12 +233,14 @@ async def writer_agent_node(state: ResearchState) -> dict:
     # ── 调用 LLM（懒加载，lru_cache 保证单例） ──────────────────────────────
     llm = load_chat_model(model_ref)
     try:
-        response = await llm.ainvoke([
+        response = await invoke_model(llm, [
             SystemMessage(content=WRITER_SYSTEM_PROMPT),
             HumanMessage(content=user_prompt),
-        ])
+        ], model_ref=model_ref, label="writer")
         report_body: str = response.content
 
+    except RunControlError:
+        raise
     except Exception as exc:
         logger.error("[WriterAgent] LLM 调用失败：%s", exc, exc_info=True)
         error_report = (

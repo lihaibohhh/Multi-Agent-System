@@ -6,6 +6,7 @@ from langchain_core.tools import tool
 
 from .support import _err, _ok, _trim_text, with_retry
 from ..core.config import settings
+from ..core.budget import RunControlError, invoke_retrieval
 from ..knowledge.client import get_knowledge_service_client
 
 
@@ -37,11 +38,11 @@ async def query_internal_knowledge(query: str) -> dict:
         )
 
     try:
-        response = await get_knowledge_service_client().search(
+        response = await invoke_retrieval(lambda: get_knowledge_service_client().search(
             q,
             top_k=settings.knowledge_service.top_k,
             retrieval_mode=settings.knowledge_service.retrieval_mode,
-        )
+        ), label="knowledge_tool")
         max_chars = settings.tools.knowledge.max_content_chars
         results = []
         for chunk in response.chunks:
@@ -71,6 +72,8 @@ async def query_internal_knowledge(query: str) -> dict:
                 "cache_hit": response.cache_hit,
             },
         )
+    except RunControlError:
+        raise
     except (TimeoutError, asyncio.TimeoutError, ConnectionError, OSError):
         raise
     except Exception as exc:

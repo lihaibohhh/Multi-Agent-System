@@ -76,7 +76,11 @@
             <button class="btn btn-primary hidden" id="start-existing-btn">▶ 启动当前 Run</button>
             <button class="btn btn-secondary hidden" id="continue-btn">↳ 基于此 Run 继续</button>
             <button class="btn btn-warning hidden" id="resume-btn">↻ 从 Checkpoint 恢复</button>
+            <button class="btn btn-warning hidden" id="pause-btn">暂停研究</button>
+            <button class="btn btn-warning hidden" id="migrate-budget-btn">确认迁移旧预算策略</button>
+            <button class="btn btn-warning hidden" id="increase-budget-btn">追加共享 Token 额度</button>
           </div>
+          <p id="run-budget" class="muted" aria-live="polite"></p>
           <div class="notice" id="notice"></div>
         </div></section>
 
@@ -125,9 +129,10 @@
           <div class="stat">报告字数<strong id="stat-chars">—</strong></div>
           <div class="stat">已报告 Token<strong id="stat-tokens">—</strong></div>
         </div>
+        <div class="card-body hidden" id="report-review"></div>
         <div class="card-body hidden" id="sections-panel">
           <h3>章节进度与草稿</h3>
-          <p class="hint">草稿中的来源编号为本章编号；最终报告会统一编号。审校受限章节会保留局限说明。</p>
+          <p class="hint">来源编号为本章编号。结论关联可定位摘录，支持关系仍是模型判断。完成后可创建章节修订 Run，原报告不变。</p>
           <div id="sections-list"></div>
         </div>
         <div class="report-placeholder" id="report-empty"><div>

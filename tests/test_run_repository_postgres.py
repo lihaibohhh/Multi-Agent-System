@@ -51,6 +51,13 @@ async def test_postgres_run_lifecycle_roundtrip() -> None:
         }])
         loaded = await repository.get_run(run_id)
         assert loaded.sections[0].draft == "saved partial draft"
+        await repository.save_report_review(run_id, {
+            "verdict": "revise", "issues": [{"kind": "coverage", "section_ids": ["section_1"],
+                                              "detail": "需要补充证据"}],
+            "summary": "integration review",
+        })
+        loaded = await repository.get_run(run_id)
+        assert loaded.report_review.issues[0].detail == "需要补充证据"
 
         completed = await repository.complete_run(run_id, "integration report")
         assert completed.status == RunStatus.COMPLETED
@@ -69,11 +76,17 @@ async def test_postgres_run_lifecycle_roundtrip() -> None:
                 report_excerpt="integration report",
                 report_truncated=False,
                 captured_at=datetime.now(timezone.utc),
+                schema_version=2,
+                revision_target="section_1",
+                revision_sections=loaded.sections,
+                report_review=loaded.report_review,
             ),
             question="PostgreSQL child check",
         )
         assert child.parent_context is not None
         assert child.parent_context.source_run_id == run_id
+        assert child.parent_context.revision_sections[0].draft == "saved partial draft"
+        assert child.parent_context.report_review.verdict == "revise"
 
         events = await repository.list_events(run_id)
         assert [event.event_type for event in events] == ["run_created"]

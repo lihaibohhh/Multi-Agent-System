@@ -40,18 +40,23 @@ def _build_state_graph() -> StateGraph:
     graph.add_node("section_write", chapters.write_section)
     graph.add_node("section_review", chapters.review_section)
     graph.add_node("section_advance", chapters.advance_section)
+    graph.add_node("section_claims", chapters.extract_claims)
+    graph.add_node("section_claim_gate", chapters.claim_gate)
+    graph.add_node("report_review", chapters.review_report)
     graph.add_node("assemble_report", chapters.assemble_sections)
     # Missing version denotes an old checkpoint. Keep its node names and edges intact.
     graph.set_conditional_entry_point(
-        lambda state: "plan_sections" if state.get("workflow_version") == 2 else "supervisor",
+        lambda state: "plan_sections" if state.get("workflow_version") in {2, 3} else "supervisor",
         {"plan_sections": "plan_sections", "supervisor": "supervisor"},
     )
     chapter_routes = {name: name for name in (
         "section_search", "section_analyze", "section_write", "section_review",
         "section_advance", "assemble_report",
+        "section_claims", "report_review",
+        "section_claim_gate",
     )}
     for node in ("plan_sections", "section_search", "section_analyze", "section_write",
-                 "section_review", "section_advance"):
+                 "section_review", "section_advance", "section_claims", "section_claim_gate", "report_review"):
         graph.add_conditional_edges(node, chapters.route_section, chapter_routes)
     graph.add_edge("assemble_report", END)
 
@@ -95,7 +100,8 @@ def build_graph(checkpointer=None):
         logger.warning(
             "[Graph] 使用 MemorySaver（仅调试用，无持久化）"
         )
-    return _build_state_graph().compile(checkpointer=checkpointer)
+    from .execution_fence import FencedCheckpointer
+    return _build_state_graph().compile(checkpointer=FencedCheckpointer(checkpointer))
 
 
 # ─────────────────────────────────────────────

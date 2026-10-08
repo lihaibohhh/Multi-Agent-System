@@ -7,7 +7,9 @@ from multi_agent_research.core import streaming
 from multi_agent_research.core.graph import build_graph
 from multi_agent_research.core.state import initial_state
 from multi_agent_research.sections import workflow
-from multi_agent_research.sections.models import SectionPlan, SectionRecord, SectionReview
+from multi_agent_research.sections.models import (
+    ClaimExtraction, ReportReview, SectionPlan, SectionRecord, SectionReview,
+)
 from multi_agent_research.sections.rendering import assemble_report, merge_results
 
 
@@ -27,8 +29,15 @@ class FakeModels:
         self.no_results = no_results
         self.questions = []
 
-    async def model(self, system, prompt, schema=None):
+    async def model(self, system, prompt, schema=None, *, validator=None, context=None):
+        output, cost = await self.raw_model(system, prompt, schema)
+        return (validator(output) if validator else output), cost
+
+    async def raw_model(self, system, prompt, schema=None):
         cost = {"tokens": 10, "unknown": 0}
+        if schema is ReportReview:
+            self.calls["report_review"] += 1
+            return ReportReview(verdict="pass", summary="全篇口径一致"), cost
         if schema is SectionPlan:
             self.calls["plan"] += 1
             return SectionPlan(sections=[
@@ -37,6 +46,14 @@ class FakeModels:
                 {"title": "结论", "question": "公司X的整体优势是否持续", "kind": "synthesis"},
             ]), cost
         chapter = next(name for name in ("成本", "渠道", "结论") if f"本章：{name}\n" in prompt)
+        if schema is ClaimExtraction:
+            self.calls[f"claims:{chapter}"] += 1
+            return ClaimExtraction(claims=[{
+                "statement": f"{chapter}的分析结论", "draft_quote": f"{chapter}的分析结论",
+                "assessment": "supported", "evidence": [{
+                    "source_number": 1, "quote": "的实际证据摘录", "relation": "supports",
+                }],
+            }]), cost
         if schema is SectionReview:
             stage = "review" if "核查章节草稿" in system else "analyze"
             self.calls[f"{stage}:{chapter}"] += 1
@@ -81,8 +98,8 @@ async def test_serial_chapters_scoped_search_and_dependent_synthesis(monkeypatch
     assert all(s["revision"] == 1 for s in result["sections"])
     assert "成本的分析结论[来源1]" in result["final_report"]
     assert "渠道的分析结论[来源2]" in result["final_report"]
-    assert result["model_calls"] == 10  # planner + analyze/write/review per chapter
-    assert result["token_budget_used"] == 100
+    assert result["model_calls"] == 14  # planner + four operations per chapter + final review
+    assert result["token_budget_used"] == 140
 
 
 @pytest.mark.asyncio
@@ -157,21 +174,22 @@ async def test_invalid_citation_never_completes_run(monkeypatch):
     fake = FakeModels()
     install(monkeypatch, fake)
 
-    async def wrong_citations(system, prompt, schema=None):
+    async def wrong_citations(system, prompt, schema=None, **kwargs):
         if schema is None:
-            return "无效结论[来源99]", {"tokens": 10, "unknown": 0}
-        return await fake.model(system, prompt, schema)
+            output = "无效结论[来源99]"
+            return kwargs["validator"](output), {"tokens": 10, "unknown": 0}
+        return await fake.model(system, prompt, schema, **kwargs)
 
     monkeypatch.setattr(workflow, "call_model", wrong_citations)
     state = initial_state("分析公司X竞争优势")
     app = build_graph()
     config = streaming.research_config("bad-citation", state)
-    with pytest.raises(ValueError, match="citation validation failed"):
+    with pytest.raises(ValueError, match="draft.citations"):
         await app.ainvoke(state, config)
     snapshot = await app.aget_state(config)
     assert snapshot.values["writer_status"] == "not_started"
     assert not snapshot.values["final_report"]
-    assert snapshot.values["sections"][0]["revision"] == 2
+    assert snapshot.values["sections"][0]["revision"] == 0
 
 
 def test_assembly_preserves_paragraphs_and_renumbers_shared_evidence():

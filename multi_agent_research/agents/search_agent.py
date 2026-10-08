@@ -6,11 +6,14 @@ search_agent.py — 检索 Agent
 from __future__ import annotations
 import logging
 import asyncio
+from httpx import TimeoutException
 from langchain_core.messages import AIMessage
 
 from ..core.config import settings
 from ..core.state import AnalystVerdict, ResearchState, SearchResult
 from ..knowledge.client import get_knowledge_service_client
+from ..core.budget import CallTimeout, RunControlError, invoke_retrieval
+from ..core.retrieval import durable_retrieval, gather_retrievals, retrieval_admitted
 
 
 logger = logging.getLogger(__name__)
@@ -35,12 +38,18 @@ async def _knowledge_search(query: str, iteration: int) -> list[SearchResult]:
         return []
 
     try:
-        response = await get_knowledge_service_client().search(
+        response = await invoke_retrieval(lambda: get_knowledge_service_client().search(
             q,
             top_k=settings.knowledge_service.top_k,
             retrieval_mode=settings.knowledge_service.retrieval_mode,
-        )
+        ), label="knowledge")
+    except RunControlError:
+        raise
     except Exception as exc:
+        if retrieval_admitted.get():
+            raise
+        if isinstance(exc.__cause__, TimeoutException):
+            raise CallTimeout("知识服务请求超时；本次检索额度保留，停止当前执行") from exc
         logger.error("[SearchAgent] knowledge-service 检索失败（%s）：%s", q, exc)
         return []
 
@@ -100,6 +109,8 @@ async def _web_search(query: str, iteration: int) -> list[SearchResult]:
     try:
         from langchain_tavily import TavilySearch
     except ImportError:
+        if retrieval_admitted.get():
+            raise
         logger.warning(
             "[SearchAgent] langchain-tavily 未安装，跳过 Web 检索。"
             "请执行：pip install langchain-tavily"
@@ -112,14 +123,17 @@ async def _web_search(query: str, iteration: int) -> list[SearchResult]:
 
     for attempt in range(1 + _WEB_MAX_RETRIES):
         try:
-            # TavilySearch 支持 dict 和 str 两种调用签名，优先用 dict
-            try:
-                raw = await tool.ainvoke({"query": q})
-            except Exception:
-                raw = await tool.ainvoke(q)
+            raw = await invoke_retrieval(lambda: tool.ainvoke({"query": q}), label="web")
+            # Installed Tavily tool returns transport exceptions as data.
+            if isinstance(raw, dict) and isinstance(raw.get("error"), Exception):
+                raise raw["error"]
             break  # 调用成功，退出重试循环
 
+        except RunControlError:
+            raise
         except (TimeoutError, asyncio.TimeoutError, ConnectionError, OSError) as e:
+            if retrieval_admitted.get():
+                raise
             # 临时错误：等待后重试
             if attempt < _WEB_MAX_RETRIES:
                 logger.warning(
@@ -132,6 +146,8 @@ async def _web_search(query: str, iteration: int) -> list[SearchResult]:
                 return []
 
         except Exception as e:
+            if retrieval_admitted.get():
+                raise
             # 永久错误（4xx、解析失败等）：直接放弃
             logger.error("[SearchAgent] Web 检索失败（%s）：%s", q, e)
             return []
@@ -146,8 +162,12 @@ async def _web_search(query: str, iteration: int) -> list[SearchResult]:
     if isinstance(raw, list):
         items: list[dict] = raw
     elif isinstance(raw, dict):
+        if retrieval_admitted.get() and ("error" in raw or not isinstance(raw.get("results"), list)):
+            raise ValueError("Tavily returned an error or invalid results")
         items = raw.get("results", [])
     else:
+        if retrieval_admitted.get():
+            raise ValueError("invalid Tavily response")
         logger.warning(
             "[SearchAgent] Tavily 返回格式未知（%s），跳过解析：%s",
             type(raw).__name__, q,
@@ -216,13 +236,28 @@ async def search_agent_node(state: ResearchState) -> dict:
     queries = [primary_query] + gaps[:2]  # 子问题 + 父任务主题 + 最多 2 个缺口
 
     # ── 并行触发所有 query 的知识服务 + Web 检索 ───
-    knowledge_tasks = [_knowledge_search(q, iteration) for q in queries]
-    web_tasks = [_web_search(q, iteration) for q in queries]
+    scope = state.get("_retrieval_scope") or {"section_id": None, "round": iteration, "revision": 0}
+    def retrieve(provider, query):
+        descriptor = {**scope, "format_version": 1, "provider": provider, "query": query.strip(),
+                      "max_content_chars": tools_con.knowledge.max_content_chars}
+        if provider == "knowledge":
+            descriptor.update(endpoint=settings.knowledge_service.base_url,
+                              top_k=settings.knowledge_service.top_k,
+                              retrieval_mode=settings.knowledge_service.retrieval_mode,
+                              use_query_cache=False)
+            async def operation():
+                return await _knowledge_search(query, iteration)
+        else:
+            descriptor.update(max_results=_WEB_MAX_RESULTS)
+            async def operation():
+                return await _web_search(query, iteration)
+        return durable_retrieval(operation, descriptor)
 
-    all_batches = await asyncio.gather(
-        *knowledge_tasks, *web_tasks,
-        return_exceptions=True,  # 单批次异常以对象形式返回，不中断其他
-    )
+    knowledge_tasks = [retrieve("knowledge", q) for q in queries if q.strip()]
+    # Disabled providers are not successful empty queries and consume no quota.
+    web_tasks = ([retrieve("web", q) for q in queries if q.strip()]
+                 if settings.tool_secrets.tavily_api_key.get_secret_value() else [])
+    all_batches = await gather_retrievals(*knowledge_tasks, *web_tasks)
 
     # ── 轮内去重 ───────────────────────────────
     # 目的：排除同一轮不同 query 召回的重复文档（跨 query 同文档）

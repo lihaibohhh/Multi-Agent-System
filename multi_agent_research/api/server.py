@@ -6,22 +6,28 @@ import asyncio
 import json
 import logging
 from collections.abc import AsyncGenerator
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 
 from fastapi import FastAPI, Header, HTTPException, Query, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from ..core.checkpointer import CheckpointerFactory
+from ..runs.runtime import InstanceUnavailableError
 from ..core.run_context import normalize_run_id
 from ..core.streaming import _get_app
 from ..knowledge.client import get_knowledge_service_client
 from ..runs.models import (
     RunCreateRequest,
     RunRecord,
+    RunSnapshot,
     SessionCreateRequest,
     SessionRecord,
     SessionTimeline,
+    SectionRevisionRequest,
+    SectionOperationRequest,
+    BudgetMigrationRequest,
+    BudgetIncreaseRequest,
 )
 from ..runs.repository import (
     PostgresRunRepository,
@@ -46,23 +52,22 @@ run_service = RunService(run_repository)
 async def lifespan(app: FastAPI):
     logger.info("[Server] 正在初始化图并检查 knowledge-service...")
     knowledge_client = get_knowledge_service_client()
-    try:
+    from ..core.streaming import reset_app
+    async with AsyncExitStack() as cleanup:
+        # All callbacks run even when another cleanup fails. Ownership is last.
+        cleanup.push_async_callback(run_repository.close)
+        cleanup.push_async_callback(reset_app)
+        cleanup.push_async_callback(CheckpointerFactory.close_all)
+        cleanup.push_async_callback(knowledge_client.aclose)
+        cleanup.push_async_callback(run_service.shutdown)
         await run_repository.open()
+        await run_repository.acquire_instance()
         await run_repository.setup()
-        interrupted = await run_service.recover_stale_runs()
-        if interrupted:
-            logger.warning(
-                "[Server] 已将 %d 个遗留 running 任务标记为 interrupted",
-                len(interrupted),
-            )
-        await asyncio.gather(_get_app(), knowledge_client.ensure_ready())
+        await _get_app()  # Durable checkpoint initialization must succeed first.
+        await knowledge_client.ensure_ready()
+        await run_service.start_runtime()
         logger.info("[Server] knowledge-service 已就绪，当前服务可用 ✅")
         yield
-    finally:
-        await run_service.shutdown()
-        await run_repository.close()
-        await knowledge_client.aclose()
-        await CheckpointerFactory.close_all()
 
 
 app = FastAPI(
@@ -99,12 +104,31 @@ def _run_http_error(exc: Exception) -> HTTPException:
 
 @app.get("/api/health")
 async def health():
-    return {
-        "status": "ok",
+    async def probe(operation, fallback):
+        try:
+            async with asyncio.timeout(8):
+                return await operation()
+        except Exception:
+            return fallback
+    store, checkpoint, runtime = await asyncio.gather(
+        probe(run_repository.health_check, False),
+        probe(CheckpointerFactory.health_check, {"status": "error", "persistent": False}),
+        probe(run_service.runtime_health, {"ownership": "unavailable", "monitor": "stopped"}),
+    )
+    ok = (store and checkpoint.get("status") == "ok" and checkpoint.get("persistent")
+          and runtime.get("ownership") == "ok" and runtime.get("monitor") == "ok"
+          and runtime.get("reconciliation") == "ok")
+    return JSONResponse(status_code=200 if ok else 503, content={
+        "status": "ok" if ok else "unavailable",
         "service": "multi-agent-research",
-        "run_store": "ok" if await run_repository.health_check() else "error",
-        "checkpointer": await CheckpointerFactory.health_check(),
-    }
+        "run_store": "ok" if store else "error",
+        "checkpointer": checkpoint, "runtime": runtime,
+    })
+
+
+@app.exception_handler(InstanceUnavailableError)
+async def instance_unavailable(request, exc):
+    return JSONResponse(status_code=503, content={"detail": str(exc)})
 
 
 @app.post(
@@ -117,6 +141,15 @@ async def create_session(request: SessionCreateRequest):
     try:
         return await run_service.create_session(**request.model_dump())
     except (RunConflictError, ValueError) as exc:
+        raise _run_http_error(exc) from exc
+
+
+@app.post("/api/runs/{run_id}/budget/increase", response_model=RunRecord,
+          summary="明确追加共享 Token 上限；累计消耗不变、不自动恢复")
+async def increase_run_budget(run_id: str, request: BudgetIncreaseRequest):
+    try:
+        return await run_service.increase_run_budget(run_id, **request.model_dump())
+    except (RunConflictError, RunNotFoundError, ValueError) as exc:
         raise _run_http_error(exc) from exc
 
 
@@ -167,6 +200,21 @@ async def get_run(run_id: str):
 
 
 @app.post(
+    "/api/runs/{run_id}/sections/{section_id}/revisions",
+    response_model=RunRecord,
+    status_code=status.HTTP_201_CREATED,
+    summary="创建章节修订 Run（保留原报告，需另行 start）",
+)
+async def create_section_revision(run_id: str, section_id: str, request: SectionRevisionRequest):
+    try:
+        return await run_service.create_section_revision(
+            run_id, section_id, instruction=request.instruction, new_run_id=request.run_id,
+        )
+    except (RunConflictError, RunNotFoundError, ValueError) as exc:
+        raise _run_http_error(exc) from exc
+
+
+@app.post(
     "/api/runs/{run_id}/start",
     response_model=RunRecord,
     status_code=status.HTTP_202_ACCEPTED,
@@ -176,6 +224,25 @@ async def start_run(run_id: str):
     try:
         return await run_service.start_run(run_id)
     except (RunConflictError, RunNotFoundError) as exc:
+        raise _run_http_error(exc) from exc
+
+
+@app.post("/api/runs/{run_id}/sections/{section_id}/operations", response_model=RunRecord,
+          status_code=status.HTTP_201_CREATED, summary="创建选章继续/仅补证据/刷新来源操作（共预算，另行启动）")
+async def create_section_operation(run_id: str, section_id: str, request: SectionOperationRequest):
+    try:
+        return await run_service.create_section_operation(run_id, section_id, mode=request.mode,
+            instruction=request.instruction, new_run_id=request.run_id)
+    except (RunConflictError, RunNotFoundError, ValueError) as exc:
+        raise _run_http_error(exc) from exc
+
+
+@app.get("/api/runs/{run_id}/snapshot", response_model=RunSnapshot,
+         summary="读取同一数据库快照内的 Run 状态与 SSE 游标")
+async def get_run_snapshot(run_id: str):
+    try:
+        return await run_service.get_snapshot(run_id)
+    except RunNotFoundError as exc:
         raise _run_http_error(exc) from exc
 
 
@@ -221,6 +288,24 @@ async def run_event_stream(
             "Connection": "keep-alive",
         },
     )
+
+
+@app.post("/api/runs/{run_id}/pause", response_model=RunRecord, status_code=202,
+          summary="请求安全暂停；当前调用在超时范围内完成，不再调度新请求")
+async def pause_run(run_id: str):
+    try:
+        return await run_service.pause_run(run_id)
+    except (RunConflictError, RunNotFoundError) as exc:
+        raise _run_http_error(exc) from exc
+
+
+@app.post("/api/runs/{run_id}/budget/migrate", response_model=RunRecord,
+          summary="显式迁移旧版时间策略，保留历史消耗；不自动执行")
+async def migrate_run_budget(run_id: str, request: BudgetMigrationRequest):
+    try:
+        return await run_service.migrate_run_budget(run_id, **request.model_dump())
+    except (RunConflictError, RunNotFoundError, ValueError) as exc:
+        raise _run_http_error(exc) from exc
 
 
 @app.get(

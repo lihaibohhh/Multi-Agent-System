@@ -396,6 +396,12 @@ input[readonly] {
   color: #ff929a;
 }
 
+.badge.paused,
+.badge.budget_limited {
+  color: #f3ca77;
+  background: rgba(243, 202, 119, 0.12);
+}
+
 .pipeline {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -404,6 +410,7 @@ input[readonly] {
 }
 
 .agent {
+  min-width: 0;
   min-height: 92px;
   padding: 13px;
   border: 1px solid var(--border);
@@ -412,6 +419,9 @@ input[readonly] {
 }
 
 .agent-name {
+  min-width: 0;
+  flex-wrap: wrap;
+  overflow-wrap: anywhere;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -419,6 +429,9 @@ input[readonly] {
 }
 
 .agent-detail {
+  overflow-wrap: anywhere;
+  max-height: 5.8em;
+  overflow: auto;
   margin-top: 8px;
   color: var(--muted);
   font-size: 12px;
@@ -621,3 +634,4 @@ input[readonly] {
 .section-artifact { border-bottom: 1px solid var(--border, #ddd); padding: 12px 0; }
 .section-artifact summary { cursor: pointer; font-weight: 600; }
 .section-artifact > div { padding: 12px 0; font-size: 14px; overflow-wrap: anywhere; }
+.section-artifact textarea { width: 100%; min-height: 72px; margin: 10px 0; }

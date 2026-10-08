@@ -6,19 +6,27 @@
 
 ## 架构概览
 
-新任务默认 `workflow_version=2`，不再让 Writer 一次生成整篇报告：
+新任务默认 `workflow_version=3`，不再让 Writer 一次生成整篇报告；版本 2 的历史 Checkpoint 继续使用第一阶段流程：
 
 ```text
 章节计划 → 本章检索 ⇄ 证据分析 → 本章写作 ⇄ 本章审校
                 ↑                            │
                 └──────── 有限补证 ──────────┘
                               ↓
-                     下一章（串行）→ 全篇装配
+                   结论—证据关联 → 下一章（串行）→ 全篇审校 → 装配
 ```
 
 每章保存问题、证据摘录、草稿版本、引用映射、审校结论与未解决问题。后续章节只接收前章的简短交接；综合章还会接收前章选用的证据摘录，不把摘要当成证据。各阶段有独立 Checkpoint；例如第二章写作失败后，可以从第二章继续，而不重写第一章。最终装配由代码完成，不再让模型重新改写整篇。
 
-阶段一默认最多 4 章，每章最多 2 轮证据收集、初稿后最多 1 次修订；仍串行运行，不是并发调度器。引用检查校验编号存在，不代表证明每项结论为真。详见 [阶段说明与后续计划](docs/chapter-research-roadmap.md)。
+默认最多 4 章，每章每次研究最多 2 轮证据收集、初稿后最多 1 次修订；仍串行运行，不是并发调度器。每章保存关键 Claim 及对应证据原文、支持/反对关系；程序核对原文与来源编号，语义支持关系仍是模型判断，不是事实证明。详见 [阶段说明与后续计划](docs/chapter-research-roadmap.md)。
+
+### 指定章节修订
+
+打开已完成的报告，在章节下输入修订要求，点击“创建本章修订 Run”，核对待重建章节后再启动。系统保留父报告，创建独立子 Run；新流程只重建目标及其传递依赖（例如综合章），未受影响章节原样沿用。新章节的 `depends_on` 与 `dependency_revisions` 记录依赖和采用的版本；过期依赖阻止装配。
+
+第一阶段章节曾读取所有前章摘要，所以修订旧产物时保守地重建目标之后的章节。没有章节产物的旧 Supervisor 报告不能局部修订，仍可作为普通父 Run 继续研究。
+
+全篇审校检查口径冲突、相反结论、重复和问题覆盖；发现问题后标记报告为 `limited` 并附问题清单，不自动改写未选中的章节。结论抽取或引文校验失败会停在对应节点，修复后可 resume，不会反复重写已保存的草稿。
 
 ### 旧版流程（历史任务兼容）
 
@@ -100,9 +108,9 @@ config = {"configurable": {"thread_id": run_id}}
 Checkpoint 的 Run。未指定 Session 时，创建 Run 会自动创建一个 Session。
 
 子 Run 可指定已完成的 `parent_run_id`，但父子 Run 必须在同一 Session。
-系统会在子 Run 创建时固化 `ParentContextSnapshot`：父问题、报告摘要片段、
-参考来源片段、截断标记和捕获时间。子 Run 只读取该快照，不复制父 Run
-的 `messages`、`search_results`、`events` 或 Checkpoint。
+系统在创建时固化 `ParentContextSnapshot`：带章节的父 Run 使用结构化交接，包含选定章节的结论、实际证据摘录、定位信息、未解决问题与模型审校时间；创建请求可指定 `parent_section_ids`，省略表示提供所有父章节供规划节点按需选择，空数组表示不提供章节。父证据标注继承来源，未重新检索的证据不能标成最新。历史报告仍保留文本快照回退。
+
+子 Run 不复制父 Run 的消息历史或 Checkpoint。章节修订 Run 会固化完整章节产物作为基线（含旧版本引用映射），以便复用未变章节；这不是复制知识库。
 
 ### 关键子结构体
 
@@ -237,6 +245,7 @@ Demo 已从 `server.py` 中拆出：FastAPI 只负责挂载 `api/static/` 资源
 | `POST /api/runs` | 创建 Run，此时不执行 |
 | `POST /api/runs/{run_id}/start` | 后台启动 `created` Run |
 | `POST /api/runs/{run_id}/resume` | 从 Checkpoint 恢复 `failed/interrupted` Run |
+| `POST /api/runs/{run_id}/sections/{section_id}/revisions` | 创建局部修订子 Run；正文为 `instruction` 和可选 `run_id`，之后另行 start |
 | `GET /api/runs/{run_id}` | 读取状态、错误或最终报告，不重复执行 |
 | `GET /api/runs/{run_id}/stream` | 回放并追踪持久化 SSE 事件，支持 `after` 游标 |
 | `GET /api/research/stream` | 旧的一步式 SSE 兼容接口（已弃用） |
@@ -255,6 +264,7 @@ Demo 已从 `server.py` 中拆出：FastAPI 只负责挂载 `api/static/` 资源
 | `section_plan` | `sections` | 新流程的章节计划 |
 | `section_progress` | `stage`, `sections` | 章节阶段产物与完整章节快照 |
 | `section_snapshot` | `sections` | 恢复时同步 Checkpoint 中的章节产物 |
+| `report_review` | `report_review` | 全篇一致性审校；问题也写入 Run 查询结果及最终报告 |
 | `supervisor_decision` | `run_id`, `iteration`, `next`, `reason` | 每轮路由决策 |
 | `search_complete` | `new_count`, `total_count`, `queries` | 检索轮次完成 |
 | `analyst_verdict` | `verdict`, `confidence`, `gaps` | 审查结论 |
@@ -390,6 +400,7 @@ if not result:
 │   ├── sections/
 │   │   ├── models.py             # 章节计划、产物、版本与次数限制
 │   │   ├── workflow.py           # 逐章检索、分析、写作、审校和推进
+│   │   ├── artifacts.py          # Claim 原文绑定、父证据交接、依赖校验与修订失效
 │   │   └── rendering.py          # 来源去重、引用验证与整篇装配
 │   ├── tools/
 │   │   ├── knowledge.py          # knowledge-service 工具适配器
@@ -424,6 +435,9 @@ if not result:
 ```powershell
 conda run -n multi-agent python -m pytest -q
 
+# 前端 DOM 契约测试（需 Node；不访问真实服务）
+node --test tests/test_demo_sections.cjs
+
 # 仅验证工具结果协议、裁剪和重试，不访问 LLM / Redis / 外网
 conda run -n multi-agent python -m unittest tests.test_tool_support -v
 ```
@@ -432,6 +446,7 @@ conda run -n multi-agent python -m unittest tests.test_tool_support -v
 |---|---|
 | `test_graph.py` | 终止条件、Supervisor 路由和初始状态 |
 | `test_sections.py` | 章节隔离、有限修订、引用装配、SQLite 重启恢复和旧版兼容 |
+| `test_section_revisions.py` | 局部修订、传递失效、证据绑定、父交接、冲突披露与 API |
 | `test_knowledge_client.py` | knowledge-service 鉴权、健康检查、检索响应与错误分类 |
 | `test_run_service.py` | 创建/执行分离、完成、中断、恢复与 SSE 断开语义 |
 | `test_run_repository_postgres.py` | PostgreSQL Run 与事件持久化（默认跳过） |
@@ -477,7 +492,7 @@ conda run -n multi-agent python -m pip install -e . --group dev --group eval
 
 ### 2. 配置环境变量
 
-从 `.env.example` 复制为本地 `.env` 后填写密钥；不要提交 `.env`。API 的 Run 存储需要本项目自己的 PostgreSQL（`POSTGRES_DB_URL`）；Checkpoint 可单独选 SQLite 或 PostgreSQL。启动时会为 `research_runs` 增加 `sections JSONB` 列，升级前请备份本项目数据库。不会修改隔壁知识库。
+从 `.env.example` 复制为本地 `.env` 后填写密钥；不要提交 `.env`。API 的 Run 存储需要本项目自己的 PostgreSQL（`POSTGRES_DB_URL`）；Checkpoint 可单独选 SQLite 或 PostgreSQL。启动时会为 `research_runs` 幂等增加 `sections`、`report_review`、`execution_id`、`model_usage` 列，并创建私有模型诊断表 `research_model_attempts`；升级前请备份本项目数据库。不会修改隔壁知识库。格式校验、事件恢复与升级操作见 [恢复说明](docs/model-output-recovery.md)。
 
 ```ini
 # .env
@@ -523,6 +538,14 @@ print(report)
 ```
 
 ### 3b. API + 浏览器 Demo
+
+API 研究预算 v2：默认累计最多 80 次模型请求、80 次检索，Token 准入阈值 500000；同研究父子 Run 共用账户。每次执行最多 1 小时，跨天继续重新计时，但累计费用和未知预留不清零。支持安全暂停；旧 Run 需明确确认迁移后继续，迁移不自动执行。Token 占用不等于真实账单。配置、迁移与已知限制见 [研究预算说明](docs/run-budget.md)。
+
+检索恢复：每条成功查询单独持久化，同批其他查询失败不丢已保存成果；恢复复用成功结果，不重复扣请求额度。暂时故障每执行最多尝试 2 次、单查询跨恢复累计最多 4 次，再受共享总预算限制。详见 [逐查询恢复验证](docs/retrieval-recovery.md)。这不等于修复知识服务性能，也不保证远端执行与本地存储 exactly-once。
+
+章节局部操作：已停止任务可选择某章继续、仅补证据或刷新来源并修订，创建子 Run 后另行启动，共用原预算。其他章节未完成时产出阶段结果，不冒充完整报告。详见 [章节局部操作](docs/section-operations.md)。
+
+API 当前要求 **单实例、单 worker**，并使用 SQLite 文件或 PostgreSQL 持久化 Checkpoint；存储初始化失败不再降级到内存启动。升级时先停止旧版进程，避免不参与实例锁的旧代码同时运行。后台失联任务会标记为可恢复，不会自动重新调用模型。详见 [运行与恢复可靠性及部署说明](docs/runtime-reliability.md)。
 
 ```bash
 conda run -n multi-agent python -m uvicorn multi_agent_research.api.server:app --host 127.0.0.1 --port 8000 --loop multi_agent_research.api.event_loop:selector_loop_factory

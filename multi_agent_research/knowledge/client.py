@@ -38,7 +38,8 @@ class KnowledgeSearchResponse(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     query: str
-    chunks: list[RetrievedChunk] = Field(default_factory=list)
+    # A missing payload is an invalid response, not a successful empty search.
+    chunks: list[RetrievedChunk] = Field(...)
     stage: str = "unknown"
     cache_hit: bool = False
     candidates_count: int = 0
@@ -105,7 +106,7 @@ class KnowledgeServiceClient:
                 f"无法连接 knowledge-service：{type(exc).__name__}"
             ) from exc
 
-        if response.status_code >= 500:
+        if response.status_code >= 500 or response.status_code in {408, 429}:
             raise KnowledgeServiceUnavailable(
                 f"knowledge-service 服务端错误（HTTP {response.status_code}）"
             )

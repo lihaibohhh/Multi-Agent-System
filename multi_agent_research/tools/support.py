@@ -9,6 +9,7 @@ import random
 import time
 from collections.abc import Callable, Iterable
 from typing import Any, TypeVar
+from ..core.budget import RunControlError, current_budget
 
 
 ToolCallable = TypeVar("ToolCallable", bound=Callable[..., Any])
@@ -127,7 +128,10 @@ def with_retry(
             for attempt in range(max_retries + 1):
                 started_at = time.perf_counter()
                 try:
-                    if is_async:
+                    if is_async and current_budget.get() is not None:
+                        # External operation owns the snapshotted Run timeout.
+                        result = await function(*args, **kwargs)
+                    elif is_async:
                         result = await asyncio.wait_for(
                             function(*args, **kwargs),
                             timeout=timeout,
@@ -156,6 +160,8 @@ def with_retry(
                         elapsed=round(time.perf_counter() - started_at, 3),
                     )
                     return result
+                except RunControlError:
+                    raise
                 except Exception as exc:
                     last_exception = exc
                     if not isinstance(exc, retryable):

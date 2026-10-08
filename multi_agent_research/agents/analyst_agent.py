@@ -14,6 +14,7 @@ from pydantic import ValidationError, BaseModel, Field
 from typing import Literal
 from ..core.state import AnalystVerdict, ResearchState, format_parent_context
 from ..utils.llm import load_chat_model
+from ..core.budget import invoke_model
 
 
 logger = logging.getLogger(__name__)
@@ -41,10 +42,6 @@ _llm = load_chat_model(model_ref)
 _structured_llm = (
     _llm
     .with_structured_output(_AnalystVerdictOutput, method="json_mode")
-    .with_retry(
-        retry_if_exception_type=(ValidationError, ValueError),
-        stop_after_attempt=2
-    )
 )
 # ─────────────────────────────────────────────
 # § 3  System Prompt
@@ -142,10 +139,10 @@ async def analyst_agent_node(state: ResearchState) -> dict:
 
     # ── 调用 LLM，强制结构化输出 ─────────────────
     try:
-        dto: _AnalystVerdictOutput = await _structured_llm.ainvoke([
+        dto: _AnalystVerdictOutput = await invoke_model(_structured_llm, [
             SystemMessage(content=ANALYST_SYSTEM_PROMPT),
             HumanMessage(content=user_prompt),
-        ])
+        ], model_ref=model_ref, label="analyst")
         analyst_verdict = AnalystVerdict(**dto.model_dump())
     except (ValidationError, ValueError) as e:
         logger.error("[AnalystAgent] 结构化输出解析失败，启用 fallback：%s", e)

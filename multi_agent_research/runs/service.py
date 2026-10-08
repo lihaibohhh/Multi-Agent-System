@@ -8,7 +8,10 @@ from collections.abc import AsyncGenerator
 from datetime import datetime, timezone
 
 from ..core.run_context import normalize_run_id, normalize_session_id
+from ..core.execution_fence import execution_fence
 from ..core.streaming import aresume_research, astream_research
+from ..sections.artifacts import parent_handoff, revision_sections
+from ..sections.model_output import attempt_sink
 from .models import (
     ParentContextSnapshot,
     RunEventRecord,
@@ -18,7 +21,11 @@ from .models import (
     SessionTimeline,
     TERMINAL_RUN_STATUSES,
 )
-from .repository import RunConflictError, RunNotFoundError, RunStore
+from .repository import RunConflictError, RunNotFoundError, RunStore, StaleExecutionError
+from .runtime import InstanceUnavailableError
+from ..core.budget import (BudgetExceeded, RunBudget, RunControlError, current_budget, remaining_seconds,
+                          ExecutionPaused, ExecutionTimeLimit, check_available)
+from ..core.config import settings
 
 
 logger = logging.getLogger(__name__)
@@ -36,21 +43,67 @@ def _extract_reference_excerpt(report: str) -> str:
 
 
 class RunService:
-    def __init__(self, repository: RunStore, *, poll_interval: float = 0.25) -> None:
+    def __init__(self, repository: RunStore, *, poll_interval: float = 0.25, heartbeat_interval: float = 5.0) -> None:
+        if heartbeat_interval <= 0:
+            raise ValueError("heartbeat_interval must be positive")
         self._repository = repository
         self._poll_interval = poll_interval
         self._tasks: dict[str, asyncio.Task] = {}
         self._lock = asyncio.Lock()
+        self._executions: dict[str, str] = {}
+        self._heartbeat_interval = heartbeat_interval
+        self._monitor: asyncio.Task | None = None
+        self._closing = False
+        self._ownership_lost = False
+        self._reconcile_ok = True
+        self._search_slots = asyncio.Semaphore(settings.agent.retrieval_concurrency)
+        self._pause_signals: dict[str, asyncio.Event] = {}
+
+    async def start_runtime(self):
+        if self._monitor and not self._monitor.done():
+            raise RuntimeError("runtime monitor is already running")
+        await self._repository.assert_instance_owner()
+        await self.recover_stale_runs()
+        self._closing = False
+        self._ownership_lost = False
+        self._monitor = asyncio.create_task(self._watch_runtime(), name="research-runtime-monitor")
+
+    async def runtime_health(self) -> dict:
+        owned = False
+        if not self._ownership_lost and not self._closing:
+            try:
+                await self._repository.assert_instance_owner()
+                owned = True
+            except Exception:
+                pass
+        return {"mode": "single_instance", "ownership": "ok" if owned else "unavailable",
+                "reconciliation": "ok" if self._reconcile_ok else "error",
+                "monitor": "ok" if self._monitor and not self._monitor.done() else "stopped"}
+
+    async def _watch_runtime(self):
+        while True:
+            await asyncio.sleep(self._heartbeat_interval)
+            try:
+                await self._repository.assert_instance_owner()
+            except Exception:
+                self._ownership_lost = True
+                for task in list(self._tasks.values()):
+                    task.cancel()
+                logger.error("[RunService] 实例所有权失去，已停止执行；需检查数据库并重启")
+                return
+            try:
+                async with asyncio.timeout(15):
+                    await self.recover_stale_runs()
+                self._reconcile_ok = True
+            except Exception as exc:
+                self._reconcile_ok = False
+                logger.error("[RunService] 对账失败，将在下次心跳重试：%s", type(exc).__name__)
 
     async def recover_stale_runs(self) -> list[str]:
-        run_ids = await self._repository.mark_stale_running_interrupted()
-        for run_id in run_ids:
-            await self._repository.append_event(
-                run_id,
-                "run_interrupted",
-                {"run_id": run_id, "reason": "service_restart"},
-            )
-        return run_ids
+        async with self._lock:
+            active = {key: self._executions[key] for key, task in self._tasks.items()
+                      if not task.done() and key in self._executions}
+            return await self._repository.reconcile_running(active)
 
     async def create_session(
         self,
@@ -83,6 +136,9 @@ class RunService:
         session_id: str | None = None,
         parent_run_id: str | None = None,
         run_id: str | None = None,
+        parent_section_ids: list[str] | None = None,
+        _revision_target: str | None = None,
+        _revision_instruction: str = "",
     ) -> RunRecord:
         resolved_run_id = normalize_run_id(run_id)
         resolved_session_id: str
@@ -94,6 +150,8 @@ class RunService:
                 raise RunConflictError(
                     f"parent run '{parent_run_id}' must be completed before it can be inherited"
                 )
+            if any(s.status not in {"complete", "limited"} for s in parent.sections):
+                raise RunConflictError("父 Run 是阶段产物，尚有未完成章节；请使用选章继续/补证据操作")
             if not parent.session_id:
                 raise RunConflictError(
                     f"parent run '{parent_run_id}' is not attached to a session"
@@ -103,14 +161,29 @@ class RunService:
                 raise RunConflictError("parent and child runs must belong to the same session")
             report = parent.final_report
             parent_context = ParentContextSnapshot(
+                schema_version=2 if parent.sections else 1,
                 source_run_id=parent.run_id,
                 source_question=parent.question,
                 report_excerpt=report[:_PARENT_REPORT_LIMIT],
                 reference_excerpt=_extract_reference_excerpt(report),
                 report_truncated=len(report) > _PARENT_REPORT_LIMIT,
                 captured_at=datetime.now(timezone.utc),
+                handoff=parent_handoff(parent.sections, parent_section_ids),
+                report_review=parent.report_review.model_copy(deep=True) if parent.report_review else None,
             )
+            if _revision_target:
+                parent_context.revision_sections = revision_sections(
+                    parent.sections, _revision_target, _revision_instruction,
+                )
+                parent_context.revision_target = _revision_target
+                # Never feed the superseded whole report/claims back as current evidence.
+                parent_context.handoff = []
+                parent_context.report_excerpt = ""
+                parent_context.reference_excerpt = ""
+                parent_context.report_review = None
         else:
+            if parent_section_ids is not None or _revision_target:
+                raise ValueError("parent selection requires parent_run_id")
             resolved_session_id = normalize_session_id(session_id)
 
         session = await self._repository.get_session(resolved_session_id)
@@ -141,89 +214,234 @@ class RunService:
         )
         return record
 
+    async def create_section_revision(
+        self, run_id: str, section_id: str, *, instruction: str, new_run_id: str | None = None,
+    ) -> RunRecord:
+        """Create, but do not execute, an immutable report revision as a child Run."""
+        if not 5 <= len(instruction.strip()) <= 2000:
+            raise ValueError("revision instruction must contain 5–2000 characters")
+        parent = await self.get_run(run_id)
+        return await self.create_run(
+            question=parent.question, parent_run_id=parent.run_id,
+            run_id=new_run_id, _revision_target=section_id,
+            _revision_instruction=instruction.strip(),
+        )
+
+    async def create_section_operation(self, run_id, section_id, *, mode, instruction, new_run_id=None):
+        from ..sections.operations import prepare_operation
+        if not 5 <= len(instruction.strip()) <= 2000:
+            raise ValueError("操作说明需包含 5–2000 个字符")
+        async with self._lock:
+            await self._repository.assert_instance_owner()
+            snapshot = await self._repository.get_snapshot(run_id)
+            parent = snapshot.run
+            if parent.status not in {RunStatus.COMPLETED, RunStatus.PAUSED, RunStatus.FAILED,
+                                     RunStatus.INTERRUPTED, RunStatus.BUDGET_LIMITED}:
+                raise RunConflictError("请先等待任务停止；不允许从执行中的章节创建局部操作")
+            if not parent.budget_id or parent.budget.get("version") != 2:
+                raise RunConflictError("请先显式迁移父研究预算；局部操作不会获得新额度")
+            if not parent.session_id:
+                raise RunConflictError("父研究缺少 Session")
+            # A failed projection write can lag behind the graph checkpoint.
+            # For unfinished Runs use the stopped checkpoint, not a stale UI view.
+            from ..core import streaming
+            source_state = {}
+            if parent.status != RunStatus.COMPLETED:
+                app = await streaming._get_app()
+                saved = await app.aget_state(streaming.research_config(parent.run_id, {}))
+                source_state = saved.values or {}
+                if not source_state.get("sections"):
+                    raise RunConflictError("未找到可用章节 Checkpoint；不能从不完整展示快照创建继续操作")
+            sections, operation = prepare_operation(source_state.get("sections") or parent.sections,
+                                                     section_id, mode, instruction.strip())
+            operation["source_cursor"] = snapshot.cursor
+            from ..sections.models import SectionPolicy
+            previous = source_state.get("parent_context") or (parent.parent_context.model_dump() if parent.parent_context else {})
+            previous_op = previous.get("section_operation") or {}
+            saved_policy = (source_state.get("section_policy") or previous_op.get("section_policy")) if mode == "continue" else None
+            operation["section_policy"] = SectionPolicy.model_validate(saved_policy or {
+                "max_search_rounds": settings.agent.section_max_search_rounds,
+                "max_revisions": settings.agent.section_max_revisions,
+            }).model_dump()
+            if mode == "continue":
+                operation["retrieval_context"] = (previous_op.get("retrieval_context") if previous_op.get("mode") == "continue"
+                    else {"source_question": previous.get("source_question", "")} if previous else None)
+            context = ParentContextSnapshot(schema_version=3, source_run_id=parent.run_id,
+                source_question=parent.question, report_excerpt="", report_truncated=False,
+                captured_at=datetime.now(timezone.utc), revision_target=section_id,
+                revision_sections=sections, section_operation=operation)
+            child = await self._repository.create_run(run_id=normalize_run_id(new_run_id),
+                session_id=parent.session_id, parent_run_id=parent.run_id, parent_context=context,
+                question=parent.question, parent_snapshot_cursor=snapshot.cursor)
+            await self._repository.append_event(child.run_id, "run_created", {
+                "run_id": child.run_id, "parent_run_id": parent.run_id, "status": "created",
+                "section_operation": operation, "budget_id": child.budget_id})
+            return child
+
     async def get_run(self, run_id: str) -> RunRecord:
         record = await self._repository.get_run(run_id)
         if record is None:
             raise RunNotFoundError(run_id)
         return record
 
+    async def get_snapshot(self, run_id: str):
+        return await self._repository.get_snapshot(run_id)
+
+    async def pause_run(self, run_id: str):
+        async with self._lock:
+            await self._repository.assert_instance_owner()
+            record = await self._repository.request_pause(run_id)
+            if run_id in self._pause_signals:
+                self._pause_signals[run_id].set()
+            return record
+
+    async def migrate_run_budget(self, run_id: str, *, confirm: bool, reason: str):
+        if not confirm or len(reason.strip()) < 5:
+            raise ValueError("迁移需明确确认并提供原因；不会清空费用或自动执行")
+        async with self._lock:
+            await self._repository.assert_instance_owner()
+            return await self._repository.migrate_run_budget(run_id, reason.strip())
+
+    async def increase_run_budget(self, run_id: str, **kwargs):
+        from .models import BudgetIncreaseRequest
+        request = BudgetIncreaseRequest.model_validate(kwargs)
+        async with self._lock:
+            await self._repository.assert_instance_owner()
+            return await self._repository.increase_run_budget(run_id, request)
+
     async def start_run(self, run_id: str, *, resume: bool = False) -> RunRecord:
         async with self._lock:
+            if self._closing or self._ownership_lost:
+                raise InstanceUnavailableError("服务正在关闭或已失去执行所有权，请重启服务")
+            await self._repository.assert_instance_owner()
             existing_task = self._tasks.get(run_id)
             if existing_task is not None and not existing_task.done():
                 return await self.get_run(run_id)
 
+            current = await self.get_run(run_id)
+            if not current.budget_id or current.budget.get("version") != 2:
+                raise RunConflictError("旧版预算需显式迁移后继续；历史消耗与未知预留不会清零")
+            try:
+                check_available(current.budget)
+            except BudgetExceeded as exc:
+                raise RunConflictError(str(exc)) from exc
+
             expected = (
-                (RunStatus.INTERRUPTED, RunStatus.FAILED)
+                (RunStatus.INTERRUPTED, RunStatus.FAILED, RunStatus.PAUSED, RunStatus.BUDGET_LIMITED)
                 if resume
                 else (RunStatus.CREATED,)
             )
-            record = await self._repository.claim_run(run_id, expected)
-            await self._repository.append_event(
-                run_id,
-                "run_resumed" if resume else "run_started",
-                {"run_id": run_id, "status": RunStatus.RUNNING.value},
-            )
-            task = asyncio.create_task(
-                self._execute(record, resume=resume),
-                name=f"research-run:{run_id}",
-            )
+            record = await self._repository.begin_execution(run_id, expected, resume=resume)
+            self._pause_signals[run_id] = asyncio.Event()
+            coroutine = self._execute(record, resume=resume)
+            try:
+                task = asyncio.create_task(coroutine, name=f"research-run:{run_id}")
+            except BaseException:
+                coroutine.close()
+                self._pause_signals.pop(run_id, None)
+                try:
+                    await self._repository.finish_execution(run_id, record.execution_id, RunStatus.INTERRUPTED,
+                        {"reason": "background_task_creation_failed"})
+                except Exception:
+                    logger.error("[RunService] 启动补偿未持久化，等待后台对账")
+                raise
             self._tasks[run_id] = task
-            task.add_done_callback(lambda _: self._tasks.pop(run_id, None))
+            self._executions[run_id] = record.execution_id
+            task.add_done_callback(lambda finished: self._task_finished(run_id, finished))
         return record
+
+    def _task_finished(self, run_id, task):
+        if self._tasks.get(run_id) is task:
+            self._tasks.pop(run_id, None)
+            self._executions.pop(run_id, None)
+            self._pause_signals.pop(run_id, None)
+        if not task.cancelled() and task.exception() is not None:
+            logger.error("[RunService] 后台执行未能保存终态，将由对账恢复：%s", run_id)
 
     async def _execute(self, record: RunRecord, *, resume: bool) -> None:
         run_id = record.run_id
+        async def save_attempt(data):
+            await self._repository.record_model_attempt(run_id, record.execution_id, data)
+        audit_token = attempt_sink.set(save_attempt)
+        fence_token = execution_fence.set((self._repository, run_id, record.execution_id))
+        budget_token = None
         try:
-            stream = (
-                aresume_research(run_id)
-                if resume
-                else astream_research(
-                    record.question,
-                    run_id,
-                    parent_context=(
-                        record.parent_context.model_dump(mode="json")
-                        if record.parent_context
-                        else None
-                    ),
-                )
+            budget_token = current_budget.set(RunBudget(self._repository, record, self._search_slots))
+            timer = asyncio.timeout(remaining_seconds(record.budget))
+            try:
+                async with timer:
+                    completed_payload = await self._run_graph(record, resume=resume)
+            except TimeoutError:
+                if timer.expired():
+                    raise ExecutionTimeLimit("本次执行时限已到，可继续；累计消耗不会重置") from None
+                raise
+            await self._repository.finish_execution(
+                run_id, record.execution_id, RunStatus.COMPLETED, completed_payload,
             )
-            completed_payload: dict | None = None
-            async for event_type, payload in stream:
-                if "sections" in payload:
-                    await self._repository.save_sections(run_id, payload["sections"])
-                await self._repository.append_event(run_id, event_type, payload)
-                if event_type == "done":
-                    completed_payload = payload
-
-            if completed_payload is None:
-                raise RuntimeError("graph finished without a done event")
-
-            await self._repository.complete_run(
-                run_id,
-                str(completed_payload.get("report", "")),
+        except ExecutionPaused as exc:
+            from ..core.retrieval import RetrievalDeferred
+            from ..sections.claim_repair import ClaimsPending
+            reason = ("claims_pending" if isinstance(exc, ClaimsPending) else
+                      "dependency_unavailable" if isinstance(exc, RetrievalDeferred) else
+                      "execution_timeout" if isinstance(exc, ExecutionTimeLimit) else "user_pause")
+            await self._repository.finish_execution(run_id, record.execution_id, RunStatus.PAUSED,
+                {"message": str(exc), "reason": reason,
+                 **({"stage": "section_claims", "section_id": exc.section_id} if isinstance(exc, ClaimsPending) else {})})
+        except RunControlError as exc:
+            await self._repository.finish_execution(
+                run_id, record.execution_id, RunStatus.BUDGET_LIMITED if isinstance(exc, BudgetExceeded) else RunStatus.FAILED,
+                {"run_id": run_id, "type": type(exc).__name__, "message": str(exc),
+                 "reason": "budget_exhausted" if isinstance(exc, BudgetExceeded) else "call_stopped",
+                 **({"budget_block": exc.details} if isinstance(exc, BudgetExceeded) else {})},
             )
+        except StaleExecutionError:
+            logger.warning("[RunService] 旧执行已失效，停止写入：%s", run_id)
         except asyncio.CancelledError:
-            record = await self._repository.interrupt_run(run_id, "service shutdown")
-            if record.status == RunStatus.INTERRUPTED:
-                await self._repository.append_event(
-                    run_id,
-                    "run_interrupted",
-                    {"run_id": run_id, "reason": "service_shutdown"},
-                )
+            await self._repository.finish_execution(
+                run_id, record.execution_id, RunStatus.INTERRUPTED,
+                {"run_id": run_id, "reason": "ownership_lost" if self._ownership_lost else "service_shutdown"},
+            )
             raise
         except Exception as exc:
             logger.error("[RunService] run %s failed: %s", run_id, exc, exc_info=True)
-            await self._repository.fail_run(run_id, str(exc))
-            await self._repository.append_event(
-                run_id,
-                "error",
+            await self._repository.finish_execution(
+                run_id, record.execution_id, RunStatus.FAILED,
                 {
                     "run_id": run_id,
                     "type": type(exc).__name__,
                     "message": str(exc),
                 },
             )
+        finally:
+            if budget_token is not None:
+                current_budget.reset(budget_token)
+            attempt_sink.reset(audit_token)
+            execution_fence.reset(fence_token)
+
+    async def _run_graph(self, record, *, resume):
+        run_id = record.run_id
+        parent = record.parent_context.model_dump(mode="json") if record.parent_context else None
+        initial_input = None
+        if resume and await self._repository.can_initialize_missing_checkpoint(run_id):
+            initial_input = {"question": record.question, "parent_context": parent}
+        stream = (aresume_research(run_id, initial_input=initial_input) if resume
+                  else astream_research(record.question, run_id, parent_context=parent))
+        completed_payload = None
+        try:
+            async for event_type, payload in stream:
+                payload = {**payload, "execution_id": record.execution_id}
+                if event_type == "done":
+                    completed_payload = payload
+                else:
+                    await self._repository.publish_execution_event(run_id, record.execution_id, event_type, payload)
+                    signal = self._pause_signals.get(run_id)
+                    if signal is not None and signal.is_set():
+                        raise ExecutionPaused("已在步骤边界暂停，累计预算与已保存章节保留")
+        finally:
+            await stream.aclose()
+        if completed_payload is None:
+            raise RuntimeError("graph finished without a done event")
+        return completed_payload
 
     async def iter_events(
         self,
@@ -243,6 +461,8 @@ class RunService:
             if record.status in TERMINAL_RUN_STATUSES or record.status in {
                 RunStatus.FAILED,
                 RunStatus.INTERRUPTED,
+                RunStatus.PAUSED,
+                RunStatus.BUDGET_LIMITED,
             }:
                 trailing = await self._repository.list_events(run_id, after=cursor)
                 for event in trailing:
@@ -252,9 +472,25 @@ class RunService:
             await asyncio.sleep(self._poll_interval)
 
     async def shutdown(self) -> None:
-        tasks = [task for task in self._tasks.values() if not task.done()]
+        self._closing = True
+        had_monitor = self._monitor is not None
+        if self._monitor is not None:
+            self._monitor.cancel()
+            await asyncio.gather(self._monitor, return_exceptions=True)
+            self._monitor = None
+        async with self._lock:
+            tasks = [task for task in self._tasks.values() if not task.done()]
+            should_reconcile = had_monitor or bool(self._tasks)
         for task in tasks:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._tasks.clear()
+        self._executions.clear()
+        # Failed startup (e.g. missing durable storage) must not alter old Runs.
+        if should_reconcile and not self._ownership_lost:
+            try:
+                async with asyncio.timeout(15):
+                    await self.recover_stale_runs()
+            except Exception as exc:
+                logger.warning("[RunService] 关闭时未能完成对账；下次成功启动后继续：%s", type(exc).__name__)

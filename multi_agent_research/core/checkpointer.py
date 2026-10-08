@@ -48,6 +48,7 @@ class CheckpointerFactory:
     _instances:  Dict[str, BaseCheckpointSaver] = {}
     _lifecycle:  Dict[str, Dict[str, Any]]      = {}
     _lock:       Optional[asyncio.Lock]          = None
+    _effective: Dict[str, str] = {}
     _logger =    logging.getLogger(__name__)
 
     _DEFAULT_SQLITE_PATH = "./checkpoints/research.sqlite3"
@@ -174,6 +175,7 @@ class CheckpointerFactory:
                         )
 
             cls._instances.clear()
+            cls._effective.clear()
             cls._lifecycle.clear()
 
         # 退出 async with 后再重置锁，下次在新 loop 中重建
@@ -182,7 +184,7 @@ class CheckpointerFactory:
     # ── 对外入口 ──────────────────────────────────────────────────────────────
 
     @classmethod
-    async def create(cls) -> Optional[BaseCheckpointSaver]:
+    async def create(cls, *, require_durable: bool = False) -> Optional[BaseCheckpointSaver]:
         """
         获取（或创建）Checkpointer 实例。
 
@@ -191,6 +193,9 @@ class CheckpointerFactory:
         """
         from multi_agent_research.core.config import settings
         backend = cls._normalize_backend(settings.agent.checkpoint_backend)
+
+        if require_durable and backend not in {"sqlite", "postgres"}:
+            raise RuntimeError("API 要求可恢复的 SQLite/PostgreSQL Checkpoint；不允许 memory/none 或未知后端")
 
         if backend == "none":
             return None
@@ -201,6 +206,7 @@ class CheckpointerFactory:
         # 快速路径
         inst = cls._instances.get(cache_key)
         if inst is not None:
+            cls._check_durable(cache_key, require_durable)
             return inst
 
         # 慢路径
@@ -208,9 +214,11 @@ class CheckpointerFactory:
             # 双重检查（等待锁期间可能已被其他协程创建）
             inst = cls._instances.get(cache_key)
             if inst is not None:
+                cls._check_durable(cache_key, require_durable)
                 return inst
 
             instance, effective_key = await cls._create_instance(backend, cache_key)
+            cls._effective[cache_key] = effective_key.split(":", 1)[0] if effective_key else "none"
 
             if instance is not None and effective_key:
                 cls._instances[effective_key] = instance
@@ -218,7 +226,13 @@ class CheckpointerFactory:
                 if effective_key != cache_key:
                     cls._instances[cache_key] = instance
 
+            cls._check_durable(cache_key, require_durable)
             return instance
+
+    @classmethod
+    def _check_durable(cls, key, required):
+        if required and cls._effective.get(key) not in {"sqlite", "postgres"}:
+            raise RuntimeError("Checkpoint 持久化初始化失败；API 拒绝降级内存，请修复存储配置后重启")
 
     # ── 各 Backend 创建逻辑 ───────────────────────────────────────────────────
 
@@ -283,15 +297,22 @@ class CheckpointerFactory:
 
         db_path.parent.mkdir(parents=True, exist_ok=True)
 
+        cm = None
+        entered = False
         try:
             cls._log(f"[Checkpointer] 初始化 SQLite: {db_path}")
             cm = AsyncSqliteSaver.from_conn_string(str(db_path))
             checkpointer = await cm.__aenter__()
-            await checkpointer.setup()
+            entered = True
+            await asyncio.wait_for(checkpointer.setup(), timeout=20)
             cls._register_lifecycle(ok_key, cm=cm)
             cls._log(f"[Checkpointer] ✅ SQLite 已启用: {db_path}")
             return checkpointer, ok_key
-        except Exception as e:
+        except BaseException as e:
+            if cm is not None and entered:
+                await cm.__aexit__(None, None, None)
+            if not isinstance(e, Exception):
+                raise
             cls._log(
                 f"[Checkpointer] ❌ SQLite 初始化失败: {type(e).__name__}: {e}", "error"
             )
@@ -325,7 +346,7 @@ class CheckpointerFactory:
             # wait_for 包裹 pool.open()：Postgres 不可达时防止永久挂起
             await asyncio.wait_for(pool.open(wait=True), timeout=connect_timeout)
             checkpointer = AsyncPostgresSaver(pool)
-            await checkpointer.setup()
+            await asyncio.wait_for(checkpointer.setup(), timeout=20)
             cls._register_lifecycle(ok_key, pool=pool)
             cls._log("[Checkpointer] ✅ Postgres 已启用")
             return checkpointer, ok_key
@@ -339,6 +360,10 @@ class CheckpointerFactory:
             return cls._fallback_to_memory(
                 f"Postgres 连接池超时（{connect_timeout}s），请检查 POSTGRES_DB_URL 和网络连通性"
             )
+        except asyncio.CancelledError:
+            if pool is not None:
+                await pool.close()
+            raise
         except Exception as e:
             if pool is not None:
                 try:
@@ -379,14 +404,14 @@ class CheckpointerFactory:
     # ── 健康检查（供 /api/health 端点消费）───────────────────────────────────
 
     @classmethod
-    async def health_check(cls) -> Dict[str, str]:
+    async def health_check(cls) -> Dict[str, Any]:
         """
         探活所有已注册 backend，返回脱敏的后端状态字典。
 
         使用不存在的 thread_id 做轻量探针，不产生副作用。
         """
         if not cls._instances:
-            return {"status": "no checkpointer initialized"}
+            return {"status": "uninitialized", "persistent": False, "backend": "none"}
 
         result: Dict[str, str] = {}
         probe_config = {"configurable": {"thread_id": "__health_probe__"}}
@@ -397,4 +422,7 @@ class CheckpointerFactory:
                 result[backend] = "ok"
             except Exception as e:
                 result[backend] = f"error: {type(e).__name__}"
-        return result
+        effective = set(cls._effective.values()) or {"memory"}
+        persistent = bool(effective) and effective <= {"sqlite", "postgres"}
+        return {**result, "status": "ok" if all(value == "ok" for value in result.values()) else "error",
+                "persistent": persistent, "backend": ",".join(sorted(effective))}

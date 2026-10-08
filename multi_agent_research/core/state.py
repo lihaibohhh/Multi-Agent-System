@@ -141,12 +141,13 @@ class ResearchState(TypedDict):
     research_question: str          # 用户原始问题
     parent_context: dict | None     # 父 Run 产物快照，不包含父 Run 内部 State
 
-    workflow_version: int           # 2: serial chapters; missing in legacy checkpoints
+    workflow_version: int           # 3: evidence/revisions; 2: chapters; missing: legacy
     sections: list[dict]            # persisted artifacts, replaced by the serial coordinator
     active_section: int
     section_policy: dict
     section_step: str
     report_quality: str
+    report_review: dict | None
     model_calls: int
     usage_unknown_calls: int
 
@@ -180,12 +181,13 @@ def initial_state(question: str, parent_context: dict | None = None) -> Research
     return ResearchState(
         research_question=question,
         parent_context=parent_context,
-        workflow_version=2,
+        workflow_version=3,
         sections=[],
         active_section=0,
         section_policy={},
         section_step="plan",
         report_quality="pending",
+        report_review=None,
         model_calls=0,
         usage_unknown_calls=0,
         task_plan=[],

@@ -32,18 +32,21 @@ logger = logging.getLogger(__name__)
 
 def research_config(run_id: str, state: dict) -> dict:
     config = checkpoint_config(run_id)
-    if state.get("workflow_version") == 2:
+    if state.get("workflow_version") in {2, 3}:
         # Hard schema limits: four chapters, four searches and four drafts each.
         # Each search/draft has a review node, plus planner/advance/assembly.
-        config["recursion_limit"] = 80
+        config["recursion_limit"] = 170  # Includes bounded, checkpointed Claim repair/gate pairs.
     return config
 
 
 def _chapter_event(node: str, output: dict, run_id: str):
+    if node == "report_review":
+        return "report_review", {"run_id": run_id, "report_review": output["report_review"]}
     if node == "assemble_report":
         return "report_ready", {"run_id": run_id, **_parse_writer(output)}
     if node not in {
         "plan_sections", "section_search", "section_analyze", "section_write", "section_review",
+        "section_claims",
     }:
         return None
     sections = output.get("sections", [])
@@ -54,13 +57,14 @@ def _chapter_event(node: str, output: dict, run_id: str):
 
 
 def _section_summary(values: dict) -> dict:
-    if values.get("workflow_version") != 2:
+    if values.get("workflow_version") not in {2, 3}:
         return {}
     return {
         "sections": values.get("sections", []),
         "report_quality": values.get("report_quality", "pending"),
         "model_calls": values.get("model_calls", 0),
         "usage_unknown_calls": values.get("usage_unknown_calls", 0),
+        "report_review": values.get("report_review"),
     }
 
 
@@ -91,9 +95,17 @@ async def _get_app():
 
     async with _get_app_lock():
         if _compiled_app is None:
-            checkpointer = await CheckpointerFactory.create()
+            checkpointer = await CheckpointerFactory.create(require_durable=True)
             _compiled_app = build_graph(checkpointer=checkpointer)
     return _compiled_app
+
+
+async def reset_app():
+    """After shutdown, do not reuse a graph with an already closed saver."""
+    global _compiled_app, _app_lock
+    async with _get_app_lock():
+        _compiled_app = None
+    _app_lock = None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -222,48 +234,53 @@ async def astream_research(
     }
 
     # ── 图执行流 ──────────────────────────────────────────────────────────────
-    async for step in app.astream(state, config=config):
-        node_name = list(step.keys())[0]
+    steps = app.astream(state, config=config)
+    try:
+        async for step in steps:
+            node_name = list(step.keys())[0]
 
-        # 跳过 LangGraph 内部节点（__start__ / __end__ 等）
-        if node_name.startswith("__"):
-            continue
+            # 跳过 LangGraph 内部节点（__start__ / __end__ 等）
+            if node_name.startswith("__"):
+                continue
 
-        node_output = step[node_name]
-        logger.debug("[Stream] 节点完成：%s | keys=%s", node_name, list(node_output.keys()))
+            node_output = step[node_name]
+            logger.debug("[Stream] 节点完成：%s | keys=%s", node_name, list(node_output.keys()))
 
-        chapter_event = _chapter_event(node_name, node_output, resolved_run_id)
-        if chapter_event:
-            yield chapter_event
-            continue
+            chapter_event = _chapter_event(node_name, node_output, resolved_run_id)
+            if chapter_event:
+                yield chapter_event
+                continue
 
-        if node_name == "supervisor":
-            yield "supervisor_decision", {
-                "run_id": resolved_run_id,
-                **_parse_supervisor(node_output),
-            }
+            if node_name == "supervisor":
+                yield "supervisor_decision", {
+                    "run_id": resolved_run_id,
+                    **_parse_supervisor(node_output),
+                }
 
-        elif node_name == "search_agent":
-            yield "search_complete", {
-                "run_id": resolved_run_id,
-                **_parse_search(node_output),
-            }
+            elif node_name == "search_agent":
+                yield "search_complete", {
+                    "run_id": resolved_run_id,
+                    **_parse_search(node_output),
+                }
 
-        elif node_name == "analyst_agent":
-            parsed = _parse_analyst(node_output)
-            if parsed:
-                yield "analyst_verdict", {"run_id": resolved_run_id, **parsed}
+            elif node_name == "analyst_agent":
+                parsed = _parse_analyst(node_output)
+                if parsed:
+                    yield "analyst_verdict", {"run_id": resolved_run_id, **parsed}
 
-        elif node_name == "writer_agent":
-            yield "report_ready", {
-                "run_id": resolved_run_id,
-                **_parse_writer(node_output),
-            }
+            elif node_name == "writer_agent":
+                yield "report_ready", {
+                    "run_id": resolved_run_id,
+                    **_parse_writer(node_output),
+                }
+    finally:
+        # Close nested graph generators before publishing a paused/terminal state.
+        await steps.aclose()
 
     # ── 读取最终 state，组装 done 事件 ───────────────────────────────────────
     final_state = await app.aget_state(config)
     vals = final_state.values
-    if vals.get("workflow_version") == 2 and vals.get("writer_status") != "complete":
+    if vals.get("workflow_version") in {2, 3} and vals.get("writer_status") != "complete":
         raise RuntimeError("chapter workflow ended without assembling a report")
 
     report = vals.get("final_report", "")
@@ -274,7 +291,7 @@ async def astream_research(
         "char_count":        len(report),
         "total_iterations":  vals.get("iteration_count", 0),
         "total_results":     sum(len(s["results"]) for s in vals.get("sections", []))
-                             if vals.get("workflow_version") == 2
+                             if vals.get("workflow_version") in {2, 3}
                              else len(vals.get("search_results", [])),
         "token_budget_used": vals.get("token_budget_used", 0),
         **_section_summary(vals),
@@ -283,6 +300,7 @@ async def astream_research(
 
 async def aresume_research(
     run_id: str,
+    *, initial_input: dict | None = None,
 ) -> AsyncGenerator[tuple[str, dict], None]:
     """Continue a failed or interrupted run from its LangGraph checkpoint."""
     resolved_run_id = normalize_run_id(run_id)
@@ -290,8 +308,17 @@ async def aresume_research(
     config = checkpoint_config(resolved_run_id)
     snapshot = await app.aget_state(config)
     if not snapshot.values:
+        if initial_input is not None:
+            # The service proved no model call, node progress or artifact exists.
+            # This is startup recovery, never a silent rerun of lost research.
+            async for name, data in astream_research(initial_input["question"], run_id,
+                                                    parent_context=initial_input.get("parent_context")):
+                if name == "start":
+                    data = {**data, "resumed": True, "reinitialized": True}
+                yield name, data
+            return
         raise LookupError(
-            f"run '{resolved_run_id}' has no checkpoint and cannot be resumed"
+            f"run '{resolved_run_id}' 缺少 Checkpoint；已有执行记录，拒绝静默重做，请恢复 Checkpoint 备份"
         )
     config = research_config(resolved_run_id, snapshot.values)
 
@@ -311,49 +338,55 @@ async def aresume_research(
         "resumed": True,
     }
 
-    if snapshot.values.get("workflow_version") == 2:
+    if snapshot.values.get("workflow_version") in {2, 3}:
         # Repair a crash between checkpoint commit and the business/event store update.
         yield "section_snapshot", {
             "run_id": resolved_run_id, "stage": "resume",
             "sections": snapshot.values.get("sections", []),
+            "report_review": snapshot.values.get("report_review"),
         }
 
     # A None input tells LangGraph to continue from the pending checkpoint
     # instead of creating a second state history for this business run.
-    async for step in app.astream(None, config=config):
-        node_name = list(step.keys())[0]
-        if node_name.startswith("__"):
-            continue
+    steps = app.astream(None, config=config)
+    try:
+        async for step in steps:
+            node_name = list(step.keys())[0]
+            if node_name.startswith("__"):
+                continue
 
-        node_output = step[node_name]
-        logger.debug("[Stream] 恢复节点完成：%s", node_name)
-        chapter_event = _chapter_event(node_name, node_output, resolved_run_id)
-        if chapter_event:
-            yield chapter_event
-            continue
-        if node_name == "supervisor":
-            yield "supervisor_decision", {
-                "run_id": resolved_run_id,
-                **_parse_supervisor(node_output),
-            }
-        elif node_name == "search_agent":
-            yield "search_complete", {
-                "run_id": resolved_run_id,
-                **_parse_search(node_output),
-            }
-        elif node_name == "analyst_agent":
-            parsed = _parse_analyst(node_output)
-            if parsed:
-                yield "analyst_verdict", {"run_id": resolved_run_id, **parsed}
-        elif node_name == "writer_agent":
-            yield "report_ready", {
-                "run_id": resolved_run_id,
-                **_parse_writer(node_output),
-            }
+            node_output = step[node_name]
+            logger.debug("[Stream] 恢复节点完成：%s", node_name)
+            chapter_event = _chapter_event(node_name, node_output, resolved_run_id)
+            if chapter_event:
+                yield chapter_event
+                continue
+            if node_name == "supervisor":
+                yield "supervisor_decision", {
+                    "run_id": resolved_run_id,
+                    **_parse_supervisor(node_output),
+                }
+            elif node_name == "search_agent":
+                yield "search_complete", {
+                    "run_id": resolved_run_id,
+                    **_parse_search(node_output),
+                }
+            elif node_name == "analyst_agent":
+                parsed = _parse_analyst(node_output)
+                if parsed:
+                    yield "analyst_verdict", {"run_id": resolved_run_id, **parsed}
+            elif node_name == "writer_agent":
+                yield "report_ready", {
+                    "run_id": resolved_run_id,
+                    **_parse_writer(node_output),
+                }
+    finally:
+        # Close nested graph generators before publishing a paused/terminal state.
+        await steps.aclose()
 
     final_state = await app.aget_state(config)
     vals = final_state.values
-    if vals.get("workflow_version") == 2 and vals.get("writer_status") != "complete":
+    if vals.get("workflow_version") in {2, 3} and vals.get("writer_status") != "complete":
         raise RuntimeError("chapter workflow ended without assembling a report")
     report = vals.get("final_report", "")
     yield "done", {
@@ -363,7 +396,7 @@ async def aresume_research(
         "char_count": len(report),
         "total_iterations": vals.get("iteration_count", 0),
         "total_results": sum(len(s["results"]) for s in vals.get("sections", []))
-                         if vals.get("workflow_version") == 2
+                         if vals.get("workflow_version") in {2, 3}
                          else len(vals.get("search_results", [])),
         "token_budget_used": vals.get("token_budget_used", 0),
         **_section_summary(vals),

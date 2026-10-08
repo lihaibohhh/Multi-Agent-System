@@ -20,6 +20,7 @@ from .state import (
     format_parent_context,
 )
 from ..utils.llm import load_chat_model
+from .budget import RunControlError, invoke_model
 from ..utils.dedup import detect_information_gain
 
 
@@ -633,7 +634,9 @@ async def supervisor_node_llm_async(state: ResearchState) -> dict:
 
     for attempt in range(MAX_LLM_ATTEMPTS):
         try:
-            raw_result: dict = await _structured_llm.ainvoke(messages)
+            raw_result: dict = await invoke_model(_structured_llm, messages, model_ref=model_ref, label="supervisor")
+        except RunControlError:
+            raise
         except Exception as e:
             logger.error("[Supervisor][async] LLM 调用异常（第%d次）: %s", attempt + 1, e,
                          exc_info=True)

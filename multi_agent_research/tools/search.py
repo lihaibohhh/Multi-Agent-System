@@ -4,6 +4,7 @@ from typing import Any
 from langchain_core.tools import tool
 from .support import _err, _ok, _shrink_search_results, with_retry
 from ..core.config import settings
+from ..core.budget import RunControlError, invoke_retrieval
 
 
 # ================================================================================
@@ -140,12 +141,9 @@ async def search(query: str) -> dict[str, Any]:
         # 初始化搜索器
         wrapped = TavilySearch(max_results=max_results)
 
-        # 调用搜索 API（Tavily 支持两种调用签名）
-        try:
-            raw = await wrapped.ainvoke({"query": q})
-        except Exception:
-            # 如果字典形式失败，尝试直接传字符串
-            raw = await wrapped.ainvoke(q)
+        raw = await invoke_retrieval(lambda: wrapped.ainvoke({"query": q}), label="web_tool")
+        if isinstance(raw, dict) and isinstance(raw.get("error"), Exception):
+            raise raw["error"]
 
         # 裁剪结果以适应上下文
         data = _shrink_search_results(raw, max_items=min(5, max_results))
@@ -157,6 +155,8 @@ async def search(query: str) -> dict[str, Any]:
         )
 
     # ════════════════════ 阶段 5：异常处理 ════════════════════
+    except RunControlError:
+        raise
     except (TimeoutError, asyncio.TimeoutError, ConnectionError, OSError):
         # 临时错误：raise 给 with_retry 装饰器，自动重试
         # 不能在这里 try-except 吞掉，否则 with_retry 无法捕获

@@ -88,3 +88,17 @@ async def test_client_classifies_http_errors() -> None:
 
     await assert_error(401, KnowledgeServiceError)
     await assert_error(503, KnowledgeServiceUnavailable)
+    await assert_error(408, KnowledgeServiceUnavailable)
+    await assert_error(429, KnowledgeServiceUnavailable)
+
+
+@pytest.mark.asyncio
+async def test_missing_chunks_is_invalid_not_a_cached_empty_success():
+    from pydantic import ValidationError
+    client = KnowledgeServiceClient(base_url="http://knowledge.test", api_key="", timeout=5,
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, json={"query": "test"})))
+    try:
+        with pytest.raises(ValidationError, match="chunks"):
+            await client.search("test", top_k=3)
+    finally:
+        await client.aclose()
