@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, NotRequired, Protocol, TypedDict
 
-from ..sections.models import ReportReview, SectionRecord, SectionReview
+from ..sections.models import SectionRecord, SectionReview
 
 
 class ModelCost(TypedDict):
@@ -41,20 +41,32 @@ class SectionPlanningRequest:
 
 
 @dataclass(frozen=True, slots=True)
-class EvidenceAnalysisRequest:
-    """Bounded context for deciding whether one chapter has enough evidence."""
+class EvidenceResearchRequest:
+    """Bounded inputs for an autonomous, read-only chapter research loop."""
 
     section_id: str
+    question: str
     section_context: str
-    evidence_text: str
+    initial_results: tuple[dict[str, Any], ...]
+    initial_gaps: tuple[str, ...]
+    parent_question: str
+    starting_round: int
+    max_search_rounds: int
+    revision: int
+    allow_retrieval: bool = True
+    skip_retrieval_on_first_turn: bool = False
+    stop_after_one_round: bool = False
+    require_fresh_results: bool = False
 
 
 @dataclass(frozen=True, slots=True)
-class EvidenceAnalysisResult:
-    """Typed result plus normalized model usage for orchestration accounting."""
+class EvidenceResearchResult:
+    """Evidence, final sufficiency decision, and deterministic loop metadata."""
 
     review: SectionReview
-    cost: ModelCost
+    results: tuple[dict[str, Any], ...]
+    search_rounds: int
+    fresh_result_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,10 +86,10 @@ class SectionWritingRequest:
 
 @dataclass(frozen=True, slots=True)
 class SectionWritingResult:
-    """Generated chapter body plus normalized usage."""
+    """Validated chapter body and the number of bounded writing attempts."""
 
     draft: str
-    cost: ModelCost
+    attempts: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,44 +103,8 @@ class SectionReviewRequest:
 
 
 @dataclass(frozen=True, slots=True)
-class SectionReviewResult:
-    """Semantic chapter review plus normalized usage."""
-
-    review: SectionReview
-    cost: ModelCost
-
-
-@dataclass(frozen=True, slots=True)
-class ClaimExtractionRequest:
-    """One bounded extraction or repair attempt for a persisted chapter."""
-
-    section: SectionRecord
-    section_context: str
-    evidence_text: str
-    work: dict[str, Any]
-    attempt: int
-    total_attempt: int
-
-
-@dataclass(frozen=True, slots=True)
-class ClaimExtractionResult:
-    """Validated partial Claim work plus normalized usage for one attempt."""
-
-    work: dict[str, Any]
-    cost: ModelCost
-
-
-@dataclass(frozen=True, slots=True)
 class ReportReviewRequest:
     """Completed chapter artifacts needed for one whole-report review."""
 
     research_question: str
     sections: tuple[SectionRecord, ...]
-
-
-@dataclass(frozen=True, slots=True)
-class ReportReviewResult:
-    """Validated whole-report review plus normalized usage."""
-
-    review: ReportReview
-    cost: ModelCost

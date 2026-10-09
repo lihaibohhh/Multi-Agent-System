@@ -15,7 +15,7 @@ async def test_stream_events_include_the_run_id(monkeypatch: pytest.MonkeyPatch)
             self.state_reads = 0
             self.input_state: dict | None = None
 
-        async def aget_state(self, config: dict):
+        async def aget_state(self, config: dict, subgraphs: bool = False):
             self.state_reads += 1
             if self.state_reads == 1:
                 return SimpleNamespace(values={})
@@ -28,7 +28,8 @@ async def test_stream_events_include_the_run_id(monkeypatch: pytest.MonkeyPatch)
                 "token_budget_used": 12,
             })
 
-        async def astream(self, state: dict, *, config: dict):
+        async def astream(self, state: dict, *, config: dict, subgraphs: bool = False):
+            assert subgraphs is True
             self.input_state = state
             yield {
                 "plan_sections": {"sections": []}
@@ -81,7 +82,7 @@ async def test_resume_continues_with_none_input(monkeypatch: pytest.MonkeyPatch)
             self.graph_input = "not-called"
             self.state_reads = 0
 
-        async def aget_state(self, config: dict):
+        async def aget_state(self, config: dict, subgraphs: bool = False):
             self.state_reads += 1
             values = {
                 "research_question": "原始问题",
@@ -94,7 +95,8 @@ async def test_resume_continues_with_none_input(monkeypatch: pytest.MonkeyPatch)
             }
             return SimpleNamespace(values=values)
 
-        async def astream(self, state: dict | None, *, config: dict):
+        async def astream(self, state: dict | None, *, config: dict, subgraphs: bool = False):
+            assert subgraphs is True
             self.graph_input = state
             yield {
                 "assemble_report": {

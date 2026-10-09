@@ -263,14 +263,18 @@ async def test_sqlite_graph_restart_replays_receipt_and_preserves_completed_chap
     # Initialize a saved section boundary, then use real resume routing twice.
     async with AsyncSqliteSaver.from_conn_string(path) as saver:
         app = build_graph(saver)
-        await app.aupdate_state(streaming.research_config("receipt-graph", state), state, as_node="section_advance")
+        await app.aupdate_state(
+            streaming.research_config("receipt-graph", state),
+            state,
+            as_node="plan_sections",
+        )
         await store.finish_execution("receipt-graph", None, RunStatus.PAUSED, {})
         store.runs["receipt-graph"].status = RunStatus.PAUSED
         await service.start_run("receipt-graph", resume=True)
         await service._tasks["receipt-graph"]
         assert store.runs["receipt-graph"].status == RunStatus.PAUSED
         snapshot = await app.aget_state(streaming.research_config("receipt-graph", state))
-        assert snapshot.next == ("section_search",)
+        assert snapshot.next == ("section_cycle",)
         assert snapshot.values["sections"][0]["draft"] == first.draft
     fail = False
     async with AsyncSqliteSaver.from_conn_string(path) as saver:

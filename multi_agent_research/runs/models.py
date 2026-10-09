@@ -21,6 +21,14 @@ class RunStatus(str, Enum):
     BUDGET_LIMITED = "budget_limited"
 
 
+class AgentExecutionStatus(str, Enum):
+    RUNNING = "running"
+    COMPLETED = "completed"
+    PAUSED = "paused"
+    FAILED = "failed"
+    INTERRUPTED = "interrupted"
+
+
 TERMINAL_RUN_STATUSES = frozenset({
     RunStatus.COMPLETED,
     RunStatus.CANCELLED,
@@ -116,6 +124,56 @@ class RunEventRecord(BaseModel):
     event_type: str
     payload: dict
     created_at: datetime
+
+
+class AgentExecutionRecord(BaseModel):
+    agent_run_id: str
+    run_id: str
+    execution_id: str
+    parent_agent_run_id: str | None = None
+    agent_name: str
+    agent_version: str
+    section_id: str | None = None
+    status: AgentExecutionStatus
+    turn: int = Field(default=0, ge=0)
+    model_ref: str | None = None
+    usage: dict[str, int] = Field(default_factory=dict)
+    local_state: dict = Field(default_factory=dict)
+    handoff: dict | None = None
+    unresolved: list[str] = Field(default_factory=list)
+    error_type: str | None = None
+    error_message: str | None = None
+    started_at: datetime
+    updated_at: datetime
+    completed_at: datetime | None = None
+
+
+class AgentLifecycleEventRecord(BaseModel):
+    sequence: int
+    event_id: str
+    agent_run_id: str
+    run_id: str
+    execution_id: str
+    event_type: str
+    turn: int = Field(ge=0)
+    details: dict = Field(default_factory=dict)
+    occurred_at: datetime
+
+
+class AgentTraceEvent(BaseModel):
+    """Public, payload-free view of one Agent lifecycle event."""
+
+    sequence: int
+    event_id: str
+    agent_run_id: str
+    parent_agent_run_id: str | None = None
+    agent_name: str
+    agent_version: str
+    section_id: str | None = None
+    event_type: str
+    turn: int = Field(ge=0)
+    details: dict = Field(default_factory=dict)
+    occurred_at: datetime
 
 
 class RunSnapshot(BaseModel):

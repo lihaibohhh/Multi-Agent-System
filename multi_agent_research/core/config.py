@@ -15,10 +15,10 @@ import yaml
 from enum import Enum
 from functools import lru_cache
 from pathlib import Path
-from typing import List, Literal
+from typing import Literal
 
 from dotenv import load_dotenv
-from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator, BaseModel
+from pydantic import AliasChoices, BaseModel, Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -220,11 +220,7 @@ class ToolConfig(BaseSettings):
         extra="ignore",
     )
 
-    tavily_api_key:  SecretStr = Field(default="", validation_alias="TAVILY_API_KEY")
-    serpapi_key:     SecretStr = Field(default="", validation_alias="SERPAPI_API_KEY")
-
-    # 部署级开关（不同环境行为不同，适合放 env）
-    enable_code_exec: bool = Field(default=False, validation_alias="ENABLE_CODE_EXEC")
+    tavily_api_key: SecretStr = Field(default="", validation_alias="TAVILY_API_KEY")
 
 
 # ---------------------------------------------------------------------------
@@ -232,8 +228,8 @@ class ToolConfig(BaseSettings):
 # ---------------------------------------------------------------------------
 class AgentConfig(BaseSettings):
     """
-    env_prefix="AGENT_" → AGENT_MAX_ITERATIONS 等
-    LangGraph 相关变量命名为 LANGGRAPH_*，通过 validation_alias 映射。
+    Agent 运行边界和 LangGraph 配置。LangGraph 相关变量命名为
+    LANGGRAPH_*，通过 validation_alias 映射。
     """
 
     model_config = SettingsConfigDict(
@@ -242,18 +238,13 @@ class AgentConfig(BaseSettings):
         extra="ignore",
     )
 
-    max_iterations:       int = Field(default=10, gt=0, description="AGENT_MAX_ITERATIONS")
-    max_retries:          int = Field(default=3, ge=0, description="AGENT_MAX_RETRIES")
-    retry_delay:          float = Field(default=1.0, ge=0, description="AGENT_RETRY_DELAY")
-    stream:               bool = Field(default=True, description="AGENT_STREAM")
-
     section_model: str = "deepseek/deepseek-chat"
     section_max_count: int = Field(default=4, ge=1, le=4)
     section_max_search_rounds: int = Field(default=2, ge=1, le=4)
     section_max_revisions: int = Field(default=1, ge=0, le=3)
 
     run_max_model_calls: int = Field(default=80, gt=0, le=1000)
-    run_max_tokens: int = Field(default=800_000, gt=0)
+    run_max_tokens: int = Field(default=600_000, gt=0)
     run_max_retrieval_calls: int = Field(default=80, gt=0, le=1000)
     run_timeout: float = Field(default=3600, gt=0, description="每次执行的时限；恢复重新计时，累计调用额度不重置")
     model_call_timeout: float = Field(default=120, gt=0)
@@ -328,35 +319,17 @@ class LoggingConfig(BaseSettings):
 # 职责：工具参数、路径、超时——适合提交 git 让团队共享的内容
 # ===========================================================================
 class KnowledgeYamlConfig(BaseModel):
-    max_content_chars: int = 800
-    max_retries: int = 2
-    timeout: int = 30
+    max_content_chars: int = Field(default=800, gt=0)
 
 
 class SearchYamlConfig(BaseModel):
-    max_results: int = 5
-    timeout:     int = 15
-    max_retries: int = 2
-
-
-class CodeExecYamlConfig(BaseModel):
-    timeout:            int = 30
-    workspace_dir:      str = str(PROJECT_ROOT / "workspace")
-    allowed_extensions: List[str] = [".txt", ".csv", ".json", ".pdf"]
-
-    @field_validator("allowed_extensions", mode="before")
-    @classmethod
-    def _parse_extensions(cls, v: str | list) -> list[str]:
-        """兼容 yaml 里写成字符串的情况：.txt,.csv,.json"""
-        if isinstance(v, str):
-            return [ext.strip() for ext in v.split(",") if ext.strip()]
-        return v
+    max_results: int = Field(default=5, ge=1, le=20)
+    max_retries: int = Field(default=2, ge=0, le=5)
 
 
 class ToolsYamlConfig(BaseModel):
     knowledge: KnowledgeYamlConfig = Field(default_factory=KnowledgeYamlConfig)
     search: SearchYamlConfig = Field(default_factory=SearchYamlConfig)
-    code_exec: CodeExecYamlConfig = Field(default_factory=CodeExecYamlConfig)
 
 
 class YamlConfig(BaseModel):

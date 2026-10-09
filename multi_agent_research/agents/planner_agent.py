@@ -1,8 +1,11 @@
-"""Section-planning agent with an explicit input/output boundary."""
+"""Runtime-managed section-planning agent."""
 
 from __future__ import annotations
 
-from .contracts import ModelCall, ModelCost, SectionPlanningRequest
+from .context import AgentContext
+from .contracts import ModelCall, SectionPlanningRequest
+from .runtime import AgentTurnResult
+from .spec import AgentSpec
 from ..sections.models import SectionPlan
 from ..sections.validation import validate_plan
 
@@ -19,20 +22,32 @@ PLANNER_SYSTEM_PROMPT = (
 class PlannerAgent:
     """Turn a research request and bounded parent context into a validated plan."""
 
-    name = "planner"
+    spec = AgentSpec(
+        name="planner",
+        description="根据研究问题和受限父任务上下文生成章节计划",
+        model_ref="section_model",
+        input_type=SectionPlanningRequest,
+        output_type=SectionPlan,
+        version="2",
+        max_turns=1,
+        # The checked gateway may perform up to three bounded correction calls.
+        # Each individual call retains the existing configured model timeout.
+        timeout_seconds=3600,
+    )
 
-    async def run(
+    async def run_turn(
         self,
         request: SectionPlanningRequest,
         *,
+        context: AgentContext,
         call_model: ModelCall,
-    ) -> tuple[SectionPlan, ModelCost]:
+    ) -> AgentTurnResult[SectionPlan]:
         prompt = (
             f"研究问题：{request.research_question}\n"
             f"最多 {request.maximum_sections} 章。\n"
             f"{request.parent_view}"
         )
-        plan, cost = await call_model(
+        plan, _ = await call_model(
             PLANNER_SYSTEM_PROMPT,
             prompt,
             SectionPlan,
@@ -41,6 +56,14 @@ class PlannerAgent:
                 request.maximum_sections,
                 set(request.available_parent_section_ids),
             ),
-            context={"agent": self.name},
+            context={
+                "agent": self.spec.name,
+                "agent_version": self.spec.version,
+                "agent_run_id": context.agent_run_id,
+            },
         )
-        return plan, cost
+        return AgentTurnResult(
+            status="completed",
+            output=plan,
+            handoff={"plan": plan.model_dump(mode="json")},
+        )

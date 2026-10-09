@@ -7,12 +7,17 @@ import logging
 from collections.abc import AsyncGenerator
 from datetime import datetime, timezone
 
+from ..agents.context import agent_checkpoint_loader
+from ..agents.events import agent_event_sink
 from ..core.run_context import normalize_run_id, normalize_session_id
 from ..core.execution_fence import execution_fence
 from ..core.streaming import aresume_research, astream_research
 from ..sections.artifacts import parent_handoff, revision_sections
 from ..sections.model_output import attempt_sink
 from .models import (
+    AgentExecutionRecord,
+    AgentLifecycleEventRecord,
+    AgentTraceEvent,
     ParentContextSnapshot,
     RunEventRecord,
     RunRecord,
@@ -29,6 +34,42 @@ from ..core.config import settings
 
 
 logger = logging.getLogger(__name__)
+
+
+def _public_agent_event_details(event: AgentLifecycleEventRecord) -> dict:
+    """Allow-list trace metadata; never copy arbitrary event details."""
+    details = event.details
+    if event.event_type in {"agent_started", "agent_model_called"}:
+        return {"model_ref": details.get("model_ref")}
+    if event.event_type.startswith("agent_tool_"):
+        safe = {
+            "tool_name": details.get("tool_name"),
+            "tool_call_id": details.get("tool_call_id"),
+        }
+        if event.event_type != "agent_tool_started":
+            safe["duration_ms"] = max(0, int(details.get("duration_ms", 0)))
+        if event.event_type == "agent_tool_failed":
+            safe["error_type"] = details.get("error_type")
+        return safe
+    safe = {}
+    if "turns" in details:
+        safe["turns"] = max(0, int(details["turns"]))
+    if "error_type" in details:
+        safe["error_type"] = details.get("error_type")
+    checkpoint = details.get("checkpoint")
+    if isinstance(checkpoint, dict):
+        usage = checkpoint.get("usage") if isinstance(checkpoint.get("usage"), dict) else {}
+        safe["checkpoint"] = {
+            "usage": {
+                key: max(0, int(usage.get(key, 0)))
+                for key in ("tokens", "unknown", "attempts")
+            },
+            "has_local_state": bool(checkpoint.get("local_state")),
+            "has_handoff": checkpoint.get("handoff") is not None,
+            "unresolved_count": len(checkpoint.get("unresolved") or []),
+            "state_discarded": bool(checkpoint.get("state_discarded", False)),
+        }
+    return safe
 _PARENT_REPORT_LIMIT = 12_000
 _PARENT_REFERENCES_LIMIT = 4_000
 
@@ -287,6 +328,50 @@ class RunService:
     async def get_snapshot(self, run_id: str):
         return await self._repository.get_snapshot(run_id)
 
+    async def list_agent_executions(self, run_id: str) -> list[AgentExecutionRecord]:
+        await self.get_run(run_id)
+        return await self._repository.list_agent_executions(run_id)
+
+    async def list_agent_events(
+        self,
+        run_id: str,
+        *,
+        after: int = 0,
+    ) -> list[AgentLifecycleEventRecord]:
+        await self.get_run(run_id)
+        return await self._repository.list_agent_events(run_id, after)
+
+    async def list_agent_trace(
+        self,
+        run_id: str,
+        *,
+        after: int = 0,
+    ) -> list[AgentTraceEvent]:
+        """Return a public trace without prompts, tool payloads, or checkpoints."""
+        await self.get_run(run_id)
+        executions, events = await asyncio.gather(
+            self._repository.list_agent_executions(run_id),
+            self._repository.list_agent_events(run_id, after),
+        )
+        identities = {record.agent_run_id: record for record in executions}
+        trace = []
+        for event in events:
+            identity = identities[event.agent_run_id]
+            trace.append(AgentTraceEvent(
+                sequence=event.sequence,
+                event_id=event.event_id,
+                agent_run_id=event.agent_run_id,
+                parent_agent_run_id=identity.parent_agent_run_id,
+                agent_name=identity.agent_name,
+                agent_version=identity.agent_version,
+                section_id=identity.section_id,
+                event_type=event.event_type,
+                turn=event.turn,
+                details=_public_agent_event_details(event),
+                occurred_at=event.occurred_at,
+            ))
+        return trace
+
     async def pause_run(self, run_id: str):
         async with self._lock:
             await self._repository.assert_instance_owner()
@@ -362,7 +447,30 @@ class RunService:
         run_id = record.run_id
         async def save_attempt(data):
             await self._repository.record_model_attempt(run_id, record.execution_id, data)
+        async def save_agent_event(event):
+            await self._repository.record_agent_event(
+                run_id,
+                record.execution_id,
+                event,
+            )
+        async def load_agent_checkpoint(agent_name, section_id):
+            previous = await self._repository.get_latest_agent_execution(
+                run_id,
+                agent_name,
+                section_id,
+            )
+            if previous is None:
+                return None
+            return {
+                "agent_run_id": previous.agent_run_id,
+                "status": previous.status.value,
+                "local_state": previous.local_state,
+                "handoff": previous.handoff,
+                "unresolved": previous.unresolved,
+            }
         audit_token = attempt_sink.set(save_attempt)
+        agent_event_token = agent_event_sink.set(save_agent_event)
+        checkpoint_loader_token = agent_checkpoint_loader.set(load_agent_checkpoint)
         fence_token = execution_fence.set((self._repository, run_id, record.execution_id))
         budget_token = None
         try:
@@ -415,6 +523,8 @@ class RunService:
         finally:
             if budget_token is not None:
                 current_budget.reset(budget_token)
+            agent_event_sink.reset(agent_event_token)
+            agent_checkpoint_loader.reset(checkpoint_loader_token)
             attempt_sink.reset(audit_token)
             execution_fence.reset(fence_token)
 

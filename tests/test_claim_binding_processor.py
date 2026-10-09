@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
+from dataclasses import fields
 
 import pytest
 
-from multi_agent_research.agents.claim_extractor_agent import ClaimExtractorAgent
-from multi_agent_research.agents.contracts import ClaimExtractionRequest
+from multi_agent_research.agents.registry import AgentRegistry, agent_registry
+from multi_agent_research.processors import ClaimBindingProcessor, ClaimBindingRequest
 from multi_agent_research.sections import claim_repair
 from multi_agent_research.sections.model_output import ModelOutputError
 from multi_agent_research.sections.models import ClaimExtraction, SectionRecord
@@ -49,19 +50,22 @@ def _example() -> tuple[SectionRecord, dict, dict]:
     return section, bad, good
 
 
-def _request(section: SectionRecord, work: dict) -> ClaimExtractionRequest:
-    return ClaimExtractionRequest(
+def _request(section: SectionRecord, work: dict) -> ClaimBindingRequest:
+    section.claim_work = work
+    return ClaimBindingRequest(
         section=section,
         section_context="本章：行业\n本章必须回答：行业趋势如何？\n",
         evidence_text="[来源1] 细分行业进入头部企业强者恒强阶段。",
-        work=work,
-        attempt=1,
-        total_attempt=4,
     )
 
 
+def test_claim_binding_is_a_processor_not_a_registered_agent() -> None:
+    assert "claim_extractor" not in {field.name for field in fields(AgentRegistry)}
+    assert not hasattr(agent_registry, "claim_extractor")
+
+
 @pytest.mark.asyncio
-async def test_claim_extractor_owns_initial_prompt_schema_and_context() -> None:
+async def test_processor_owns_initial_prompt_binding_and_attempt_accounting() -> None:
     section, _, good = _example()
     initial = claim_repair.new_work(section)
     captured = {}
@@ -71,23 +75,29 @@ async def test_claim_extractor_owns_initial_prompt_schema_and_context() -> None:
         extraction = ClaimExtraction(claims=[good])
         return validator(extraction), {"tokens": 17, "unknown": 0, "attempts": 1}
 
-    result = await ClaimExtractorAgent().run(
+    result = await ClaimBindingProcessor().process_attempt(
         _request(section, initial),
         call_model=call_model,
     )
 
     assert set(result.work["accepted"]) == {"1"}
     assert result.work["pending"] == []
+    assert result.work["attempts"] == 1
+    assert result.work["total_attempts"] == 1
+    assert result.completed is True
+    assert len(result.claims) == 1
     assert initial["accepted"] == {}
+    assert initial["attempts"] == 0
     assert result.cost["tokens"] == 17
     assert captured["schema"] is ClaimExtraction
     assert captured["context"] == {
-        "agent": "claim_extractor",
+        "processor": "claim_binding",
+        "model_component": "claim_candidate_extractor",
         "section_id": "section_2",
         "revision": 2,
         "single_attempt": True,
         "claim_attempt": 1,
-        "claim_total_attempt": 4,
+        "claim_total_attempt": 1,
         "claim_mode": "extract",
     }
     assert "不声称穷尽" in captured["system"]
@@ -95,7 +105,7 @@ async def test_claim_extractor_owns_initial_prompt_schema_and_context() -> None:
 
 
 @pytest.mark.asyncio
-async def test_claim_extractor_repairs_only_pending_slots() -> None:
+async def test_processor_repairs_only_pending_slots() -> None:
     section, bad, good = _example()
     work = claim_repair.split_extraction(section, [good, bad])
     accepted_before = dict(work["accepted"])
@@ -121,7 +131,7 @@ async def test_claim_extractor_repairs_only_pending_slots() -> None:
         )
         return validator(patches), {"tokens": 9, "unknown": 0}
 
-    result = await ClaimExtractorAgent().run(
+    result = await ClaimBindingProcessor().process_attempt(
         _request(section, work),
         call_model=call_model,
     )
@@ -133,10 +143,11 @@ async def test_claim_extractor_repairs_only_pending_slots() -> None:
     assert result.work["accepted"]["1"] == accepted_before["1"]
     assert set(result.work["accepted"]) == {"1", "2"}
     assert result.work["pending"] == []
+    assert result.completed is True
 
 
 @pytest.mark.asyncio
-async def test_claim_extractor_salvages_valid_siblings_from_retryable_output() -> None:
+async def test_processor_salvages_valid_siblings_from_retryable_output() -> None:
     section, bad, good = _example()
     malformed = dict(bad, assessment="invalid")
 
@@ -152,7 +163,7 @@ async def test_claim_extractor_salvages_valid_siblings_from_retryable_output() -
             cost={"tokens": 11, "unknown": 0, "attempts": 1},
         )
 
-    result = await ClaimExtractorAgent().run(
+    result = await ClaimBindingProcessor().process_attempt(
         _request(section, claim_repair.new_work(section)),
         call_model=call_model,
     )
@@ -160,4 +171,6 @@ async def test_claim_extractor_salvages_valid_siblings_from_retryable_output() -
     assert set(result.work["accepted"]) == {"1"}
     assert [pending["slot"] for pending in result.work["pending"]] == [2]
     assert result.work["diagnostic_id"] == "diag-claim"
+    assert result.work["attempts"] == 1
+    assert result.completed is False
     assert result.cost["tokens"] == 11

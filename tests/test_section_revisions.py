@@ -302,11 +302,13 @@ async def test_failed_claim_binding_resumes_without_rewriting_draft(monkeypatch,
         app = build_graph(saver)
         with pytest.raises(claim_repair.ClaimsPending):
             await app.ainvoke(state, config)
-        snapshot = await app.aget_state(config)
-        assert snapshot.next == ("section_claim_gate",)
-        assert snapshot.values["sections"][0]["draft"]
-        assert snapshot.values["sections"][0]["claims"] == []
-        assert snapshot.values['sections'][0]['claim_work']['attempts'] == 3
+        snapshot = await app.aget_state(config, subgraphs=True)
+        assert snapshot.next == ("section_cycle",)
+        child = snapshot.tasks[0].state
+        assert child.next == ("section_claim_gate",)
+        assert child.values["sections"][0]["draft"]
+        assert child.values["sections"][0]["claims"] == []
+        assert child.values['sections'][0]['claim_work']['attempts'] == 3
     invalid = False
     execution[0] = 'second'
     async with AsyncSqliteSaver.from_conn_string(database) as saver:

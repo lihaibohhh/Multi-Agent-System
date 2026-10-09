@@ -18,6 +18,7 @@ from ..core.run_context import normalize_run_id
 from ..core.streaming import _get_app
 from ..knowledge.client import get_knowledge_service_client
 from ..runs.models import (
+    AgentTraceEvent,
     RunCreateRequest,
     RunRecord,
     RunSnapshot,
@@ -242,6 +243,21 @@ async def create_section_operation(run_id: str, section_id: str, request: Sectio
 async def get_run_snapshot(run_id: str):
     try:
         return await run_service.get_snapshot(run_id)
+    except RunNotFoundError as exc:
+        raise _run_http_error(exc) from exc
+
+
+@app.get(
+    "/api/runs/{run_id}/agent-trace",
+    response_model=list[AgentTraceEvent],
+    summary="读取不含 Prompt、工具参数和 Checkpoint 内容的 Agent Trace",
+)
+async def get_agent_trace(
+    run_id: str,
+    after: int = Query(default=0, ge=0, description="仅读取该 sequence 之后的 Agent 事件"),
+):
+    try:
+        return await run_service.list_agent_trace(run_id, after=after)
     except RunNotFoundError as exc:
         raise _run_http_error(exc) from exc
 

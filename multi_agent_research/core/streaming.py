@@ -23,12 +23,14 @@ def research_config(run_id: str, state: dict) -> dict:
 
 
 def _chapter_event(node: str, output: dict, run_id: str):
+    if not isinstance(output, dict):
+        return None
     if node == "report_review":
         return "report_review", {"run_id": run_id, "report_review": output["report_review"]}
     if node == "assemble_report":
         return "report_ready", {"run_id": run_id, **_parse_writer(output)}
     if node not in {
-        "plan_sections", "section_search", "section_analyze", "section_write", "section_review",
+        "plan_sections", "section_search", "section_write", "section_review",
         "section_claims",
     }:
         return None
@@ -39,6 +41,16 @@ def _chapter_event(node: str, output: dict, run_id: str):
     }
 
 
+def _stream_update(step):
+    """Normalize parent and nested-subgraph update stream records."""
+    if isinstance(step, tuple) and len(step) == 2:
+        namespace, output = step
+    else:
+        namespace, output = (), step
+    node_name = list(output.keys())[0]
+    return namespace, node_name, output[node_name]
+
+
 def _section_summary(values: dict) -> dict:
     return {
         "sections": values.get("sections", []),
@@ -47,6 +59,22 @@ def _section_summary(values: dict) -> dict:
         "usage_unknown_calls": values.get("usage_unknown_calls", 0),
         "report_review": values.get("report_review"),
     }
+
+
+def _effective_snapshot_values(snapshot) -> dict:
+    """Use the deepest persisted child state when a chapter subgraph is pending."""
+    current = snapshot
+    values = dict(snapshot.values)
+    while True:
+        nested = [
+            task.state
+            for task in getattr(current, "tasks", ())
+            if hasattr(task.state, "values")
+        ]
+        if not nested:
+            return values
+        current = nested[0]
+        values.update(current.values)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -135,17 +163,20 @@ async def astream_research(
     }
 
     # ── 图执行流 ──────────────────────────────────────────────────────────────
-    steps = app.astream(state, config=config)
+    steps = app.astream(state, config=config, subgraphs=True)
     try:
         async for step in steps:
-            node_name = list(step.keys())[0]
+            _, node_name, node_output = _stream_update(step)
 
             # 跳过 LangGraph 内部节点（__start__ / __end__ 等）
             if node_name.startswith("__"):
                 continue
 
-            node_output = step[node_name]
-            logger.debug("[Stream] 节点完成：%s | keys=%s", node_name, list(node_output.keys()))
+            logger.debug(
+                "[Stream] 节点完成：%s | keys=%s",
+                node_name,
+                list(node_output.keys()) if isinstance(node_output, dict) else [],
+            )
 
             chapter_event = _chapter_event(node_name, node_output, resolved_run_id)
             if chapter_event:
@@ -182,7 +213,23 @@ async def aresume_research(
     app = await _get_app()
     config = checkpoint_config(resolved_run_id)
     snapshot = await app.aget_state(config)
-    if not snapshot.values:
+    if snapshot.values:
+        has_pending_subgraph = any(
+            getattr(task, "name", "") == "section_cycle"
+            for task in getattr(snapshot, "tasks", ())
+        )
+        if has_pending_subgraph:
+            expanded = await app.aget_state(config, subgraphs=True)
+            values = (
+                _effective_snapshot_values(expanded)
+                if expanded.values
+                else snapshot.values
+            )
+        else:
+            values = snapshot.values
+    else:
+        values = {}
+    if not values:
         if initial_input is not None:
             # The service proved no model call, node progress or artifact exists.
             # This is startup recovery, never a silent rerun of lost research.
@@ -195,19 +242,19 @@ async def aresume_research(
         raise LookupError(
             f"run '{resolved_run_id}' 缺少 Checkpoint；已有执行记录，拒绝静默重做，请恢复 Checkpoint 备份"
         )
-    if snapshot.values.get("workflow_version") != CURRENT_WORKFLOW_VERSION:
+    if values.get("workflow_version") != CURRENT_WORKFLOW_VERSION:
         raise RuntimeError(
             "Checkpoint 属于已移除的旧工作流，不能在当前图中恢复；请重新创建研究任务"
         )
-    config = research_config(resolved_run_id, snapshot.values)
+    config = research_config(resolved_run_id, values)
 
     question = str(
-        snapshot.values.get(
+        values.get(
             "research_question",
-            snapshot.values.get("question", ""),
+            values.get("question", ""),
         )
     )
-    parent_context = snapshot.values.get("parent_context")
+    parent_context = values.get("parent_context")
     yield "start", {
         "question": question,
         "run_id": resolved_run_id,
@@ -220,20 +267,19 @@ async def aresume_research(
     # Repair a crash between checkpoint commit and the business/event store update.
     yield "section_snapshot", {
         "run_id": resolved_run_id, "stage": "resume",
-        "sections": snapshot.values.get("sections", []),
-        "report_review": snapshot.values.get("report_review"),
+        "sections": values.get("sections", []),
+        "report_review": values.get("report_review"),
     }
 
     # A None input tells LangGraph to continue from the pending checkpoint
     # instead of creating a second state history for this business run.
-    steps = app.astream(None, config=config)
+    steps = app.astream(None, config=config, subgraphs=True)
     try:
         async for step in steps:
-            node_name = list(step.keys())[0]
+            _, node_name, node_output = _stream_update(step)
             if node_name.startswith("__"):
                 continue
 
-            node_output = step[node_name]
             logger.debug("[Stream] 恢复节点完成：%s", node_name)
             chapter_event = _chapter_event(node_name, node_output, resolved_run_id)
             if chapter_event:

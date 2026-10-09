@@ -12,10 +12,13 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
+from ..agents.events import AgentEvent
 from ..core.config import settings
 from .runtime import InstanceLock
 from ..core.budget import new_budget, start_budget, reserve, settle, budget_summary, migrate_budget, ExecutionPaused
 from .models import (
+    AgentExecutionRecord,
+    AgentLifecycleEventRecord,
     BudgetIncreaseRequest,
     ParentContextSnapshot,
     RunEventRecord,
@@ -36,6 +39,20 @@ class RunConflictError(RuntimeError):
 
 class StaleExecutionError(RunConflictError):
     """An obsolete worker attempted to write a replaced or terminal execution."""
+
+
+_AGENT_EVENT_STATUS = {
+    "agent_started": "running",
+    "agent_turn_started": "running",
+    "agent_model_called": "running",
+    "agent_tool_started": "running",
+    "agent_tool_completed": "running",
+    "agent_tool_failed": "running",
+    "agent_retrying": "running",
+    "agent_paused": "paused",
+    "agent_completed": "completed",
+    "agent_failed": "failed",
+}
 
 
 class RunStore(Protocol):
@@ -70,6 +87,13 @@ class RunStore(Protocol):
     async def get_run(self, run_id: str) -> RunRecord | None: ...
     async def get_snapshot(self, run_id: str) -> RunSnapshot: ...
     async def record_model_attempt(self, run_id: str, execution_id: str | None, data: dict) -> None: ...
+    async def record_agent_event(self, run_id: str, execution_id: str,
+                                 event: AgentEvent) -> AgentExecutionRecord: ...
+    async def get_agent_execution(self, agent_run_id: str) -> AgentExecutionRecord | None: ...
+    async def get_latest_agent_execution(self, run_id: str, agent_name: str,
+                                         section_id: str | None) -> AgentExecutionRecord | None: ...
+    async def list_agent_executions(self, run_id: str) -> list[AgentExecutionRecord]: ...
+    async def list_agent_events(self, run_id: str, after: int = 0) -> list[AgentLifecycleEventRecord]: ...
     async def finish_execution(self, run_id: str, execution_id: str | None,
                                status: RunStatus, payload: dict) -> RunRecord: ...
     async def save_sections(self, run_id: str, sections: list[dict]) -> None: ...
@@ -221,6 +245,53 @@ class PostgresRunRepository:
                 "CREATE INDEX IF NOT EXISTS research_model_attempts_run_idx "
                 "ON research_model_attempts(run_id, created_at)"
             )
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS research_agent_executions (
+                    agent_run_id TEXT PRIMARY KEY,
+                    run_id VARCHAR(128) NOT NULL REFERENCES research_runs(run_id) ON DELETE CASCADE,
+                    execution_id TEXT NOT NULL,
+                    parent_agent_run_id TEXT,
+                    agent_name TEXT NOT NULL,
+                    agent_version TEXT NOT NULL,
+                    section_id TEXT,
+                    status TEXT NOT NULL CHECK (
+                        status IN ('running','completed','paused','failed','interrupted')
+                    ),
+                    turn INTEGER NOT NULL DEFAULT 0 CHECK (turn >= 0),
+                    model_ref TEXT,
+                    usage JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    local_state JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    handoff JSONB,
+                    unresolved JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    error_type TEXT,
+                    error_message TEXT,
+                    started_at TIMESTAMPTZ NOT NULL,
+                    updated_at TIMESTAMPTZ NOT NULL,
+                    completed_at TIMESTAMPTZ
+                )
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS research_agent_executions_run_idx
+                ON research_agent_executions(run_id, started_at, agent_run_id)
+            """)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS research_agent_events (
+                    sequence BIGSERIAL PRIMARY KEY,
+                    event_id TEXT NOT NULL UNIQUE,
+                    agent_run_id TEXT NOT NULL REFERENCES research_agent_executions(agent_run_id)
+                        ON DELETE CASCADE,
+                    run_id VARCHAR(128) NOT NULL REFERENCES research_runs(run_id) ON DELETE CASCADE,
+                    execution_id TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    turn INTEGER NOT NULL CHECK (turn >= 0),
+                    details JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    occurred_at TIMESTAMPTZ NOT NULL
+                )
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS research_agent_events_run_sequence_idx
+                ON research_agent_events(run_id, sequence)
+            """)
             await conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS research_run_events (
@@ -422,6 +493,171 @@ class PostgresRunRepository:
                           'unknown', COALESCE((model_usage->>'unknown')::bigint, 0) + %s)
                         WHERE run_id = %s
                     """, (data["tokens"], data["unknown"], run_id))
+
+    async def record_agent_event(
+        self,
+        run_id: str,
+        execution_id: str,
+        event: AgentEvent,
+    ) -> AgentExecutionRecord:
+        """Idempotently append a lifecycle event and advance its Agent snapshot."""
+        if event.run_id != run_id:
+            raise ValueError("Agent event run_id does not match the current execution")
+        status = _AGENT_EVENT_STATUS[event.event_type]
+        details = event.details
+        checkpoint = details.get("checkpoint") or {}
+        has_checkpoint = isinstance(details.get("checkpoint"), dict)
+        terminal = status in {"completed", "paused", "failed"}
+        async with self.guard_execution(run_id, execution_id) as conn:
+            duplicate = await (await conn.execute(
+                "SELECT agent_run_id FROM research_agent_events WHERE event_id = %s",
+                (event.event_id,),
+            )).fetchone()
+            if duplicate is not None:
+                if duplicate["agent_run_id"] != event.agent_run_id:
+                    raise RunConflictError("Agent event_id 已绑定到其他 Agent 执行")
+                row = await (await conn.execute(
+                    "SELECT * FROM research_agent_executions WHERE agent_run_id = %s",
+                    (event.agent_run_id,),
+                )).fetchone()
+                return AgentExecutionRecord.model_validate(row)
+            owner = await (await conn.execute("""
+                SELECT run_id, execution_id, status FROM research_agent_executions
+                WHERE agent_run_id = %s
+            """, (event.agent_run_id,))).fetchone()
+            if owner and (
+                owner["run_id"] != run_id or owner["execution_id"] != execution_id
+            ):
+                raise RunConflictError("agent_run_id 已属于其他 Run 或执行批次")
+            if owner and owner["status"] != "running":
+                raise RunConflictError("终态 Agent 执行不能追加新的生命周期事件")
+            await conn.execute("""
+                INSERT INTO research_agent_executions (
+                    agent_run_id, run_id, execution_id, parent_agent_run_id,
+                    agent_name, agent_version, section_id, status, turn, model_ref,
+                    usage, local_state, handoff, unresolved, error_type, error_message,
+                    started_at, updated_at, completed_at
+                ) VALUES (
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s
+                )
+                ON CONFLICT (agent_run_id) DO UPDATE SET
+                    status = CASE
+                        WHEN research_agent_executions.status IN
+                            ('completed','paused','failed','interrupted')
+                        THEN research_agent_executions.status
+                        ELSE EXCLUDED.status
+                    END,
+                    turn = GREATEST(research_agent_executions.turn, EXCLUDED.turn),
+                    model_ref = COALESCE(EXCLUDED.model_ref, research_agent_executions.model_ref),
+                    usage = CASE WHEN %s
+                        THEN EXCLUDED.usage ELSE research_agent_executions.usage END,
+                    local_state = CASE WHEN %s
+                        THEN EXCLUDED.local_state ELSE research_agent_executions.local_state END,
+                    handoff = CASE WHEN %s
+                        THEN EXCLUDED.handoff ELSE research_agent_executions.handoff END,
+                    unresolved = CASE WHEN %s
+                        THEN EXCLUDED.unresolved ELSE research_agent_executions.unresolved END,
+                    error_type = COALESCE(EXCLUDED.error_type, research_agent_executions.error_type),
+                    error_message = COALESCE(EXCLUDED.error_message, research_agent_executions.error_message),
+                    updated_at = EXCLUDED.updated_at,
+                    completed_at = COALESCE(
+                        research_agent_executions.completed_at,
+                        EXCLUDED.completed_at
+                    )
+            """, (
+                event.agent_run_id,
+                run_id,
+                execution_id,
+                event.parent_agent_run_id,
+                event.agent_name,
+                event.agent_version,
+                event.section_id,
+                status,
+                event.turn,
+                details.get("model_ref"),
+                Jsonb(checkpoint.get("usage", {})),
+                Jsonb(checkpoint.get("local_state", {})),
+                Jsonb(checkpoint.get("handoff")) if checkpoint.get("handoff") is not None else None,
+                Jsonb(checkpoint.get("unresolved", [])),
+                details.get("error_type"),
+                details.get("error_message") or details.get("reason"),
+                event.occurred_at,
+                event.occurred_at,
+                event.occurred_at if terminal else None,
+                has_checkpoint,
+                has_checkpoint,
+                has_checkpoint,
+                has_checkpoint,
+            ))
+            await conn.execute("""
+                INSERT INTO research_agent_events (
+                    event_id, agent_run_id, run_id, execution_id,
+                    event_type, turn, details, occurred_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            """, (
+                event.event_id,
+                event.agent_run_id,
+                run_id,
+                execution_id,
+                event.event_type,
+                event.turn,
+                Jsonb(details),
+                event.occurred_at,
+            ))
+            row = await (await conn.execute(
+                "SELECT * FROM research_agent_executions WHERE agent_run_id = %s",
+                (event.agent_run_id,),
+            )).fetchone()
+        return AgentExecutionRecord.model_validate(row)
+
+    async def get_agent_execution(
+        self,
+        agent_run_id: str,
+    ) -> AgentExecutionRecord | None:
+        async with self._require_pool().connection() as conn:
+            row = await (await conn.execute(
+                "SELECT * FROM research_agent_executions WHERE agent_run_id = %s",
+                (agent_run_id,),
+            )).fetchone()
+        return AgentExecutionRecord.model_validate(row) if row else None
+
+    async def get_latest_agent_execution(
+        self,
+        run_id: str,
+        agent_name: str,
+        section_id: str | None,
+    ) -> AgentExecutionRecord | None:
+        """Return the newest checkpoint candidate for one logical Agent scope."""
+        async with self._require_pool().connection() as conn:
+            row = await (await conn.execute("""
+                SELECT * FROM research_agent_executions
+                WHERE run_id = %s AND agent_name = %s
+                  AND section_id IS NOT DISTINCT FROM %s
+                ORDER BY updated_at DESC, agent_run_id DESC
+                LIMIT 1
+            """, (run_id, agent_name, section_id))).fetchone()
+        return AgentExecutionRecord.model_validate(row) if row else None
+
+    async def list_agent_executions(self, run_id: str) -> list[AgentExecutionRecord]:
+        async with self._require_pool().connection() as conn:
+            rows = await (await conn.execute("""
+                SELECT * FROM research_agent_executions
+                WHERE run_id = %s ORDER BY started_at, agent_run_id
+            """, (run_id,))).fetchall()
+        return [AgentExecutionRecord.model_validate(row) for row in rows]
+
+    async def list_agent_events(
+        self,
+        run_id: str,
+        after: int = 0,
+    ) -> list[AgentLifecycleEventRecord]:
+        async with self._require_pool().connection() as conn:
+            rows = await (await conn.execute("""
+                SELECT * FROM research_agent_events
+                WHERE run_id = %s AND sequence > %s ORDER BY sequence
+            """, (run_id, after))).fetchall()
+        return [AgentLifecycleEventRecord.model_validate(row) for row in rows]
 
     async def reserve_budget(self, run_id, execution_id, reservation_id, kind, tokens, label):
         async with self.guard_execution(run_id, execution_id) as conn:
@@ -663,6 +899,7 @@ class PostgresRunRepository:
                         jsonb_each(a.budget->'reservations') e WHERE a.budget_id=r.budget_id
                         AND (e.value->>'run_id'=r.run_id OR NOT e.value ? 'run_id'))
                     AND NOT EXISTS(SELECT 1 FROM research_model_attempts a WHERE a.run_id = r.run_id)
+                    AND NOT EXISTS(SELECT 1 FROM research_agent_events a WHERE a.run_id = r.run_id)
                     AND NOT EXISTS(SELECT 1 FROM research_run_events e WHERE e.run_id = r.run_id
                         AND e.event_type NOT IN ('run_created', 'run_started', 'run_resumed', 'start',
                                                'error', 'run_interrupted', 'section_snapshot', 'pause_requested',
@@ -695,6 +932,37 @@ class PostgresRunRepository:
             await conn.execute("UPDATE research_runs SET report_review = %s, updated_at = NOW() WHERE run_id = %s",
                                (Jsonb(review) if review else None, run_id))
 
+    async def _terminalize_agent_executions(
+        self,
+        conn,
+        run_id: str,
+        execution_id: str | None,
+        run_status: RunStatus,
+        payload: dict,
+    ) -> None:
+        status = {
+            RunStatus.FAILED: "failed",
+            RunStatus.PAUSED: "paused",
+            RunStatus.BUDGET_LIMITED: "paused",
+            RunStatus.INTERRUPTED: "interrupted",
+            RunStatus.COMPLETED: "interrupted",
+        }[run_status]
+        await conn.execute("""
+            UPDATE research_agent_executions
+            SET status = %s,
+                error_type = COALESCE(error_type, %s),
+                error_message = COALESCE(error_message, %s),
+                updated_at = NOW(), completed_at = COALESCE(completed_at, NOW())
+            WHERE run_id = %s AND execution_id IS NOT DISTINCT FROM %s
+              AND status = 'running'
+        """, (
+            status,
+            payload.get("type") or "RunExecutionEnded",
+            payload.get("message") or payload.get("reason"),
+            run_id,
+            execution_id,
+        ))
+
     async def publish_execution_event(self, run_id: str, execution_id: str, event_type: str, payload: dict):
         async with self.guard_execution(run_id, execution_id) as conn:
             await self._apply_artifacts(conn, run_id, payload)
@@ -718,6 +986,13 @@ class PostgresRunRepository:
                     run_id = row["run_id"]
                     await conn.execute("UPDATE research_runs SET status = 'interrupted', error_message = %s, "
                                        "updated_at = NOW() WHERE run_id = %s", ("执行进程退出或后台任务失联，可从 Checkpoint 恢复", run_id))
+                    await self._terminalize_agent_executions(
+                        conn,
+                        run_id,
+                        row["execution_id"],
+                        RunStatus.INTERRUPTED,
+                        {"reason": "execution_orphaned"},
+                    )
                     await conn.execute("INSERT INTO research_run_events (run_id, event_type, payload) VALUES (%s, %s, %s)",
                         (run_id, "run_interrupted", Jsonb({"run_id": run_id, "execution_id": row["execution_id"], "reason": "execution_orphaned"})))
                     interrupted.append(run_id)
@@ -744,6 +1019,13 @@ class PostgresRunRepository:
                           AND execution_id IS NOT DISTINCT FROM %s RETURNING *
                 """, (status.value, report, error, status.value, run_id, execution_id))).fetchone()
                 if row:
+                    await self._terminalize_agent_executions(
+                        conn,
+                        run_id,
+                        execution_id,
+                        status,
+                        payload,
+                    )
                     await self._apply_artifacts(conn, run_id, payload)
                     row = await (await conn.execute("SELECT * FROM research_runs WHERE run_id = %s", (run_id,))).fetchone()
                     row["budget"] = await self._account_budget(conn, row)

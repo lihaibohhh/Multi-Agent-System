@@ -3,7 +3,8 @@
 const $ = (id) => document.getElementById(id);
 const TERMINAL = new Set(["completed", "failed", "interrupted", "cancelled", "paused", "budget_limited"]);
 const RESUMABLE = new Set(["failed", "interrupted", "paused", "budget_limited"]);
-const AGENTS = ["planner", "evidence-analyst", "section-writer", "section-reviewer", "claim-extractor", "report-reviewer"];
+const AGENTS = ["planner", "evidence-research", "section-writer", "section-reviewer", "report-reviewer"];
+const PROCESSORS = ["claim-binding"];
 
 const state = {
   source: null,
@@ -71,11 +72,12 @@ function resetPipeline() {
   renderSections([]);
   renderReportReview(null);
   for (const name of AGENTS) $("agent-" + name).className = "agent";
+  for (const name of PROCESSORS) $("processor-" + name).className = "agent processor";
   $("meta-planner").textContent = "章节规划";
-  $("meta-evidence-analyst").textContent = "证据充分性分析";
+  $("meta-evidence-research").textContent = "多轮只读证据研究";
   $("meta-section-writer").textContent = "章节写作";
   $("meta-section-reviewer").textContent = "章节语义审校";
-  $("meta-claim-extractor").textContent = "结论—证据关联";
+  $("meta-claim-binding").textContent = "固定的抽取、校验、修复与绑定流程";
   $("meta-report-reviewer").textContent = "全篇一致性审校";
   $("event-log").replaceChildren();
   $("event-cursor").textContent = "event #0";
@@ -196,6 +198,13 @@ function setAgent(name, status, detail) {
   const node = $("agent-" + name);
   if (!node) return;
   node.className = `agent ${status || ""}`;
+  if (detail) $("meta-" + name).textContent = detail;
+}
+
+function setProcessor(name, status, detail) {
+  const node = $("processor-" + name);
+  if (!node) return;
+  node.className = `agent processor ${status || ""}`;
   if (detail) $("meta-" + name).textContent = detail;
 }
 
@@ -528,8 +537,12 @@ function handleRunEvent(type, event) {
     if (state.currentRun) state.currentRun.report_review = data.report_review;
   }
   if (type.startsWith("section_")) {
-    const target = { plan_sections: "planner", section_analyze: "evidence-analyst", section_write: "section-writer", section_review: "section-reviewer", section_claims: "claim-extractor" }[data.stage];
-    if (target) setAgent(target, "done", eventMessage(type, data));
+    if (data.stage === "section_claims") {
+      setProcessor("claim-binding", "done", eventMessage(type, data));
+    } else {
+      const target = { plan_sections: "planner", section_search: "evidence-research", section_write: "section-writer", section_review: "section-reviewer" }[data.stage];
+      if (target) setAgent(target, "done", eventMessage(type, data));
+    }
   }
   if (type === "report_review") setAgent("report-reviewer", "done", "全篇一致性审校完成");
 
@@ -565,12 +578,17 @@ function handleRunEvent(type, event) {
     state.receivedTerminal = true;
     const status = ({error: "failed", run_interrupted: "interrupted", run_paused: "paused", budget_limited: "budget_limited"})[type];
     setRunStatus(status);
-    const failedAgent = ({section_claims:"claim-extractor", section_review:"section-reviewer", section_analyze:"evidence-analyst", section_write:"section-writer", report_review:"report-reviewer", plan_sections:"planner"})[data.stage];
-    if (failedAgent) {
+    const failedAgent = ({section_review:"section-reviewer", section_search:"evidence-research", section_write:"section-writer", report_review:"report-reviewer", plan_sections:"planner"})[data.stage];
+    if (data.stage === "section_claims") {
+      setProcessor("claim-binding", "error", data.reason === "claims_pending" ? `${data.section_id}：结论关联待修复，展开章节查看详情` : `${data.section_id || ""}：步骤停止，见错误详情`);
+    } else if (failedAgent) {
       setAgent(failedAgent, "error", data.reason === "claims_pending" ? `${data.section_id}：结论关联待修复，展开章节查看详情` : `${data.section_id || ""}：步骤停止，见错误详情`);
     } else {
       for (const name of AGENTS) {
         if ($("agent-" + name).classList.contains("active")) setAgent(name, "error", "执行停止，详见下方错误信息");
+      }
+      for (const name of PROCESSORS) {
+        if ($("processor-" + name).classList.contains("active")) setProcessor(name, "error", "执行停止，详见下方错误信息");
       }
     }
     if (state.currentRun) {

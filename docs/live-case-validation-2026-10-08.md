@@ -81,7 +81,7 @@
 
 ## 复现方式
 
-脚本 `scripts/reproduce_retrieval_case.py` 是手动诊断入口，不会被普通 pytest 自动执行。当前固定读取上面的原案例；如果原 Run 后续变化，输入也会变化。调用 `chapter` 会产生模型及外部检索费用；`probes`/`partial-failure` 不调用模型。
+脚本 `scripts/reproduce_retrieval_case.py` 是手动诊断入口，不会被普通 pytest 自动执行。当前固定读取上面的原案例；如果原 Run 后续变化，输入也会变化。原报告结果是当时旧节点链路的历史记录；当前 `chapter` 模式已改走 EvidenceResearchAgent、Writer、Reviewer 和 ClaimBindingProcessor，不再调用已删除的独立 `analyze` 节点。调用 `chapter` 会产生模型及外部检索费用；`probes`/`partial-failure` 不调用模型。
 
 ```powershell
 $env:LANGCHAIN_TRACING_V2='false'

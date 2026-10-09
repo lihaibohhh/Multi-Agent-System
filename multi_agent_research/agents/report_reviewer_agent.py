@@ -1,10 +1,13 @@
-"""Agent responsible for semantic consistency review across completed chapters."""
+"""Runtime-managed Agent for semantic consistency review across chapters."""
 
 from __future__ import annotations
 
 import json
 
-from .contracts import ModelCall, ReportReviewRequest, ReportReviewResult
+from .context import AgentContext
+from .contracts import ModelCall, ReportReviewRequest
+from .runtime import AgentTurnResult
+from .spec import AgentSpec
 from ..sections.models import ReportReview
 from ..sections.validation import validate_report_review
 
@@ -20,14 +23,24 @@ REPORT_REVIEWER_SYSTEM_PROMPT = (
 class ReportReviewerAgent:
     """Review report-wide meaning without deciding graph transitions."""
 
-    name = "report_reviewer"
+    spec = AgentSpec(
+        name="report_reviewer",
+        description="审查全篇章节之间的冲突、重复、范围和覆盖问题",
+        model_ref="section_model",
+        input_type=ReportReviewRequest,
+        output_type=ReportReview,
+        version="2",
+        max_turns=1,
+        timeout_seconds=3600,
+    )
 
-    async def run(
+    async def run_turn(
         self,
         request: ReportReviewRequest,
         *,
+        context: AgentContext,
         call_model: ModelCall,
-    ) -> ReportReviewResult:
+    ) -> AgentTurnResult[ReportReview]:
         known = {section.section_id for section in request.sections}
         view = [
             {
@@ -47,12 +60,21 @@ class ReportReviewerAgent:
             }
             for section in request.sections
         ]
-        review, cost = await call_model(
+        review, _ = await call_model(
             REPORT_REVIEWER_SYSTEM_PROMPT,
             f"研究问题：{request.research_question}\n章节："
             + json.dumps(view, ensure_ascii=False),
             ReportReview,
             validator=lambda value: validate_report_review(value, known),
-            context={"agent": self.name, "section_ids": sorted(known)},
+            context={
+                "agent": self.spec.name,
+                "agent_version": self.spec.version,
+                "agent_run_id": context.agent_run_id,
+                "section_ids": sorted(known),
+            },
         )
-        return ReportReviewResult(review=review, cost=cost)
+        return AgentTurnResult(
+            status="completed",
+            output=review,
+            handoff={"review": review.model_dump(mode="json")},
+        )

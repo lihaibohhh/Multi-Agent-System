@@ -1,16 +1,8 @@
 tools:
   knowledge:
     max_content_chars: 800
-    max_retries: 2
-    timeout: 30
 
   search:
     max_results: 5
-    timeout: 15
     max_retries: 2
-
-  code_exec:
-    timeout: 30
-    workspace_dir: './workspace'
-    allowed_extensions: [".txt", ".csv", ".json", ".pdf"]
 

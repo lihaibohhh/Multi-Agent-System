@@ -226,13 +226,17 @@ def test_expired_execution_time_is_reset_but_account_is_not():
 
 
 @pytest.mark.asyncio
-async def test_retained_tool_interface_cannot_swallow_budget_stop(monkeypatch):
-    from multi_agent_research.tools.knowledge import query_internal_knowledge
+async def test_current_knowledge_retrieval_cannot_swallow_budget_stop(monkeypatch):
+    from multi_agent_research.retrieval import service as retrieval_service
+    class Client:
+        async def search(self, *args, **kwargs):
+            raise AssertionError("budget gate must stop before transport")
+    monkeypatch.setattr(retrieval_service, "get_knowledge_service_client", Client)
     monkeypatch.setattr(settings.agent, "run_max_retrieval_calls", 1)
     async with scope_for() as (store, _, record):
         await store.reserve_budget(record.run_id, record.execution_id, "used", "retrieval", 0, "test")
         with pytest.raises(BudgetExceeded):
-            await query_internal_knowledge.ainvoke({"query": "offline test"})
+            await retrieval_service._knowledge_search("offline test", 0)
         assert store.runs[record.run_id].budget["retrieval_calls"] == 1
 
 

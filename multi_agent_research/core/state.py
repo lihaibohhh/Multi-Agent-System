@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import Literal, TypedDict
 
 
-CURRENT_WORKFLOW_VERSION = 4
+CURRENT_WORKFLOW_VERSION = 5
 
 
 def format_parent_context(state: ResearchState, *, max_chars: int = 4_000) -> str:

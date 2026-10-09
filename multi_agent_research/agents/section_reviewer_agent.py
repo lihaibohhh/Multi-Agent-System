@@ -1,8 +1,11 @@
-"""Agent responsible only for semantic review of one chapter draft."""
+"""Runtime-managed Agent for semantic review of one chapter draft."""
 
 from __future__ import annotations
 
-from .contracts import ModelCall, SectionReviewRequest, SectionReviewResult
+from .context import AgentContext
+from .contracts import ModelCall, SectionReviewRequest
+from .runtime import AgentTurnResult
+from .spec import AgentSpec
 from ..sections.models import SectionReview
 from ..sections.validation import validate_section_review
 
@@ -18,15 +21,25 @@ SECTION_REVIEWER_SYSTEM_PROMPT = (
 class SectionReviewerAgent:
     """Review chapter meaning without deciding graph transitions or retry limits."""
 
-    name = "section_reviewer"
+    spec = AgentSpec(
+        name="section_reviewer",
+        description="审查单章草稿的证据支持、问题覆盖和反证处理",
+        model_ref="section_model",
+        input_type=SectionReviewRequest,
+        output_type=SectionReview,
+        version="2",
+        max_turns=1,
+        timeout_seconds=3600,
+    )
 
-    async def run(
+    async def run_turn(
         self,
         request: SectionReviewRequest,
         *,
+        context: AgentContext,
         call_model: ModelCall,
-    ) -> SectionReviewResult:
-        review, cost = await call_model(
+    ) -> AgentTurnResult[SectionReview]:
+        review, _ = await call_model(
             SECTION_REVIEWER_SYSTEM_PROMPT,
             request.section_context
             + "来源：\n"
@@ -34,6 +47,15 @@ class SectionReviewerAgent:
             + f"\n草稿：\n{request.draft}",
             SectionReview,
             validator=validate_section_review,
-            context={"agent": self.name, "section_id": request.section_id},
+            context={
+                "agent": self.spec.name,
+                "agent_version": self.spec.version,
+                "agent_run_id": context.agent_run_id,
+                "section_id": request.section_id,
+            },
         )
-        return SectionReviewResult(review=review, cost=cost)
+        return AgentTurnResult(
+            status="completed",
+            output=review,
+            handoff={"review": review.model_dump(mode="json")},
+        )

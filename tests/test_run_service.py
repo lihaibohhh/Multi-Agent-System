@@ -9,7 +9,11 @@ from uuid import uuid4
 
 import pytest
 
+from multi_agent_research.agents.events import AgentEvent
 from multi_agent_research.runs.models import (
+    AgentExecutionRecord,
+    AgentExecutionStatus,
+    AgentLifecycleEventRecord,
     ParentContextSnapshot,
     RunEventRecord,
     RunRecord,
@@ -28,6 +32,8 @@ class MemoryRunStore:
         self.runs: dict[str, RunRecord] = {}
         self.sessions: dict[str, SessionRecord] = {}
         self.events: list[RunEventRecord] = []
+        self.agent_executions: dict[str, AgentExecutionRecord] = {}
+        self.agent_events: list[AgentLifecycleEventRecord] = []
         self.diagnostics: list[dict] = []
         self.retrievals = {}
         self.owned = True
@@ -46,6 +52,7 @@ class MemoryRunStore:
         return (not record.sections and not record.final_report and not record.report_review
                 and not own_reservations and not record.model_usage.get("attempts")
                 and not any(d.get("run_id") == run_id for d in self.diagnostics)
+                and not any(e.run_id == run_id for e in self.agent_events)
                 and not any(e.run_id == run_id and e.event_type not in allowed for e in self.events))
 
     @asynccontextmanager
@@ -168,6 +175,102 @@ class MemoryRunStore:
                    "unknown": usage.get("unknown", 0) + data["unknown"]}
         self.runs[run_id] = self.runs[run_id].model_copy(update={"model_usage": updated})
 
+    async def record_agent_event(self, run_id, execution_id, event: AgentEvent):
+        if event.run_id != run_id:
+            raise ValueError("Agent event run_id mismatch")
+        async with self.guard_execution(run_id, execution_id):
+            duplicate = next(
+                (item for item in self.agent_events if item.event_id == event.event_id),
+                None,
+            )
+            if duplicate is not None:
+                if duplicate.agent_run_id != event.agent_run_id:
+                    raise RunConflictError("Agent event ID conflict")
+                return self.agent_executions[event.agent_run_id]
+            status = AgentExecutionStatus({
+                "agent_started": "running",
+                "agent_turn_started": "running",
+                "agent_model_called": "running",
+                "agent_tool_started": "running",
+                "agent_tool_completed": "running",
+                "agent_tool_failed": "running",
+                "agent_retrying": "running",
+                "agent_paused": "paused",
+                "agent_completed": "completed",
+                "agent_failed": "failed",
+            }[event.event_type])
+            current = self.agent_executions.get(event.agent_run_id)
+            if current and (
+                current.run_id != run_id or current.execution_id != execution_id
+            ):
+                raise RunConflictError("Agent run ID conflict")
+            if current and current.status != AgentExecutionStatus.RUNNING:
+                raise RunConflictError("Terminal Agent event conflict")
+            details = event.details
+            checkpoint = details.get("checkpoint") or {}
+            has_checkpoint = isinstance(details.get("checkpoint"), dict)
+            occurred_at = datetime.fromisoformat(event.occurred_at)
+            record = AgentExecutionRecord(
+                agent_run_id=event.agent_run_id,
+                run_id=run_id,
+                execution_id=execution_id,
+                parent_agent_run_id=event.parent_agent_run_id,
+                agent_name=event.agent_name,
+                agent_version=event.agent_version,
+                section_id=event.section_id,
+                status=status,
+                turn=max(event.turn, current.turn if current else 0),
+                model_ref=details.get("model_ref") or (current.model_ref if current else None),
+                usage=(checkpoint.get("usage", {}) if has_checkpoint
+                       else (current.usage if current else {})),
+                local_state=(checkpoint.get("local_state", {}) if has_checkpoint
+                             else (current.local_state if current else {})),
+                handoff=(checkpoint.get("handoff") if has_checkpoint
+                         else (current.handoff if current else None)),
+                unresolved=(checkpoint.get("unresolved", []) if has_checkpoint
+                            else (current.unresolved if current else [])),
+                error_type=details.get("error_type") or (current.error_type if current else None),
+                error_message=(details.get("error_message") or details.get("reason")
+                               or (current.error_message if current else None)),
+                started_at=current.started_at if current else occurred_at,
+                updated_at=occurred_at,
+                completed_at=(current.completed_at if current else None)
+                or (occurred_at if status != AgentExecutionStatus.RUNNING else None),
+            )
+            self.agent_executions[event.agent_run_id] = record
+            self.agent_events.append(AgentLifecycleEventRecord(
+                sequence=len(self.agent_events) + 1,
+                event_id=event.event_id,
+                agent_run_id=event.agent_run_id,
+                run_id=run_id,
+                execution_id=execution_id,
+                event_type=event.event_type,
+                turn=event.turn,
+                details=details,
+                occurred_at=occurred_at,
+            ))
+            return record
+
+    async def get_agent_execution(self, agent_run_id):
+        return self.agent_executions.get(agent_run_id)
+
+    async def get_latest_agent_execution(self, run_id, agent_name, section_id):
+        matches = [
+            record for record in self.agent_executions.values()
+            if record.run_id == run_id
+            and record.agent_name == agent_name
+            and record.section_id == section_id
+        ]
+        return max(matches, key=lambda item: (item.updated_at, item.agent_run_id), default=None)
+
+    async def list_agent_executions(self, run_id):
+        return [record for record in self.agent_executions.values()
+                if record.run_id == run_id]
+
+    async def list_agent_events(self, run_id, after=0):
+        return [event for event in self.agent_events
+                if event.run_id == run_id and event.sequence > after]
+
     async def reserve_budget(self, run_id, execution_id, reservation_id, kind, tokens, label):
         async with self.guard_execution(run_id, execution_id):
             record = self.runs[run_id]
@@ -247,6 +350,24 @@ class MemoryRunStore:
         if status == RunStatus.COMPLETED:
             update["final_report"] = payload["report"]
         self.runs[run_id] = current.model_copy(update=update)
+        agent_status = {
+            RunStatus.COMPLETED: AgentExecutionStatus.INTERRUPTED,
+            RunStatus.FAILED: AgentExecutionStatus.FAILED,
+            RunStatus.INTERRUPTED: AgentExecutionStatus.INTERRUPTED,
+            RunStatus.PAUSED: AgentExecutionStatus.PAUSED,
+            RunStatus.BUDGET_LIMITED: AgentExecutionStatus.PAUSED,
+        }[status]
+        now = datetime.now(timezone.utc)
+        for agent_run_id, agent in list(self.agent_executions.items()):
+            if (agent.run_id == run_id and agent.execution_id == execution_id
+                    and agent.status == AgentExecutionStatus.RUNNING):
+                self.agent_executions[agent_run_id] = agent.model_copy(update={
+                    "status": agent_status,
+                    "error_type": payload.get("type") or "RunExecutionEnded",
+                    "error_message": payload.get("message") or payload.get("reason"),
+                    "updated_at": now,
+                    "completed_at": agent.completed_at or now,
+                })
         kinds = {RunStatus.COMPLETED: "done", RunStatus.FAILED: "error", RunStatus.INTERRUPTED: "run_interrupted",
                  RunStatus.PAUSED: "run_paused", RunStatus.BUDGET_LIMITED: "budget_limited"}
         await self.append_event(run_id, kinds[status], {

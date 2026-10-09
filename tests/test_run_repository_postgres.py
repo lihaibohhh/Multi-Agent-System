@@ -6,7 +6,12 @@ from datetime import datetime, timezone
 
 import pytest
 
-from multi_agent_research.runs.models import ParentContextSnapshot, RunStatus
+from multi_agent_research.agents.events import AgentEvent
+from multi_agent_research.runs.models import (
+    AgentExecutionStatus,
+    ParentContextSnapshot,
+    RunStatus,
+)
 from multi_agent_research.runs.repository import PostgresRunRepository
 
 
@@ -43,6 +48,51 @@ async def test_postgres_run_lifecycle_roundtrip() -> None:
         await repository.append_event(run_id, "run_created", {"run_id": run_id})
         running = await repository.claim_run(run_id, (RunStatus.CREATED,))
         assert running.status == RunStatus.RUNNING
+
+        agent_run_id = f"agent_{uuid.uuid4().hex}"
+        started = AgentEvent(
+            event_type="agent_started",
+            agent_name="planner",
+            agent_version="2",
+            run_id=run_id,
+            agent_run_id=agent_run_id,
+            parent_agent_run_id=None,
+            section_id=None,
+            turn=0,
+            details={"model_ref": "section_model"},
+        )
+        await repository.record_agent_event(
+            run_id,
+            running.execution_id,
+            started,
+        )
+        await repository.record_agent_event(
+            run_id,
+            running.execution_id,
+            AgentEvent(
+                event_type="agent_completed",
+                agent_name="planner",
+                agent_version="2",
+                run_id=run_id,
+                agent_run_id=agent_run_id,
+                parent_agent_run_id=None,
+                section_id=None,
+                turn=1,
+                details={
+                    "checkpoint": {
+                        "usage": {"tokens": 8, "unknown": 0, "attempts": 1},
+                        "local_state": {"planned": True},
+                        "handoff": {"plan": {"sections": []}},
+                        "unresolved": [],
+                    }
+                },
+            ),
+        )
+        agent_execution = await repository.get_agent_execution(agent_run_id)
+        assert agent_execution.status == AgentExecutionStatus.COMPLETED
+        assert agent_execution.local_state == {"planned": True}
+        assert await repository.get_latest_agent_execution(run_id, "planner", None) == agent_execution
+        assert len(await repository.list_agent_events(run_id)) == 2
 
         await repository.save_sections(run_id, [{
             "section_id": "section_1", "title": "Integration chapter",

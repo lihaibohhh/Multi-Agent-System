@@ -86,7 +86,7 @@
 
         <section class="card"><div class="card-body">
           <div class="card-title-row">
-            <h2 class="card-title">Agent Pipeline</h2>
+            <h2 class="card-title">Research Pipeline</h2>
             <span class="hint" id="event-cursor">event #0</span>
           </div>
           <div class="pipeline">
@@ -94,9 +94,9 @@
               <div class="agent-name">🧭 Planner</div>
               <div class="agent-detail" id="meta-planner">章节规划</div>
             </article>
-            <article class="agent" id="agent-evidence-analyst">
-              <div class="agent-name">🔬 Evidence Analyst</div>
-              <div class="agent-detail" id="meta-evidence-analyst">证据充分性分析</div>
+            <article class="agent" id="agent-evidence-research">
+              <div class="agent-name">🔬 Evidence Research</div>
+              <div class="agent-detail" id="meta-evidence-research">多轮只读证据研究</div>
             </article>
             <article class="agent" id="agent-section-writer">
               <div class="agent-name">✍️ Section Writer</div>
@@ -106,16 +106,16 @@
               <div class="agent-name">✅ Section Reviewer</div>
               <div class="agent-detail" id="meta-section-reviewer">章节语义审校</div>
             </article>
-            <article class="agent" id="agent-claim-extractor">
-              <div class="agent-name">🔗 Claim Extractor</div>
-              <div class="agent-detail" id="meta-claim-extractor">结论—证据关联</div>
+            <article class="agent processor" id="processor-claim-binding">
+              <div class="agent-name">🔗 Claim Binding Processor</div>
+              <div class="agent-detail" id="meta-claim-binding">固定的抽取、校验、修复与绑定流程</div>
             </article>
             <article class="agent" id="agent-report-reviewer">
               <div class="agent-name">📋 Report Reviewer</div>
               <div class="agent-detail" id="meta-report-reviewer">全篇一致性审校</div>
             </article>
           </div>
-          <p class="hint">非 Agent：Retrieval Service 负责 knowledge-service/Tavily 只读检索、重试、去重和标准化。</p>
+          <p class="hint">非 Agent：Claim Binding Processor 负责固定的 Claim 产物加工。非 Agent：Retrieval Service 负责 knowledge-service/Tavily 只读检索、重试、去重和标准化。</p>
           <div class="event-log" id="event-log" aria-live="polite"></div>
         </div></section>
       </aside>

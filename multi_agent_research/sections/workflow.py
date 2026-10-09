@@ -4,21 +4,26 @@ import json
 from copy import deepcopy
 from datetime import datetime, timezone
 
+from langchain_core.runnables import RunnableConfig
+
 from ..agents.contracts import (
-    ClaimExtractionRequest,
-    EvidenceAnalysisRequest,
+    EvidenceResearchRequest,
     ReportReviewRequest,
     SectionPlanningRequest,
     SectionReviewRequest,
     SectionWritingRequest,
 )
+from ..agents.context import AgentContext, create_resumable_agent_context
+from ..agents.events import dispatch_agent_event
 from ..agents.registry import agent_registry
+from ..agents.runtime import AgentConfigurationError, AgentRunner
 from ..core.config import settings
 from ..core.state import format_parent_context
-from ..retrieval import RetrievalRequest, retrieve_evidence
+from ..processors import ClaimBindingRequest, claim_binding_processor
+from ..retrieval import retrieve_evidence
 from ..utils.llm import load_chat_model
 from .models import (
-    ClaimExtraction, SectionDraft, SectionPolicy,
+    SectionDraft, SectionPolicy,
     SectionRecord,
 )
 from .rendering import (
@@ -28,7 +33,7 @@ from .rendering import (
     format_results_for_prompt,
     merge_results,
 )
-from .artifacts import dependency_issues, stamp_results, validate_dependencies
+from .artifacts import dependency_issues, validate_dependencies
 from .model_output import invoke_checked
 from . import claim_repair
 from .operations import FINISHED, continue_step, operation_summary
@@ -38,6 +43,51 @@ async def call_model(system: str, prompt: str, schema=None, *, validator=None, c
     """All chapter schemas share explicit format instructions and bounded corrections."""
     model = load_chat_model(settings.agent.section_model)
     return await invoke_checked(model, system, prompt, schema, validator=validator, context=context)
+
+
+def resolve_agent_model(spec):
+    """Resolve symbolic Agent model ownership to the existing checked gateway."""
+    if spec.model_ref != "section_model":
+        raise AgentConfigurationError(
+            f"Agent '{spec.name}' 使用了未知模型引用：{spec.model_ref}"
+        )
+    return call_model
+
+
+async def _retrieve_tool(request):
+    """Late-bound adapter keeps tests and deployments able to replace the provider."""
+    return await retrieve_evidence(request)
+
+
+agent_runner = AgentRunner(
+    resolve_agent_model,
+    tools={"retrieve_evidence": _retrieve_tool},
+    event_sink=dispatch_agent_event,
+)
+
+
+def _agent_context(
+    config: RunnableConfig | None = None,
+    *,
+    section_id: str | None = None,
+) -> AgentContext:
+    """Build run-local Agent identity without adding fields to checkpointed State."""
+    run_id = str((config or {}).get("configurable", {}).get("thread_id", "")).strip()
+    return AgentContext.create(run_id or "standalone", section_id=section_id)
+
+
+async def _resumable_agent_context(
+    agent_name: str,
+    config: RunnableConfig | None = None,
+    *,
+    section_id: str | None = None,
+) -> AgentContext:
+    run_id = str((config or {}).get("configurable", {}).get("thread_id", "")).strip()
+    return await create_resumable_agent_context(
+        run_id or "standalone",
+        agent_name,
+        section_id=section_id,
+    )
 
 
 def _usage(state: dict, cost: dict) -> dict:
@@ -135,7 +185,7 @@ def _prompt(state: dict, section: SectionRecord) -> str:
     )
 
 
-async def plan_sections(state: dict) -> dict:
+async def plan_sections(state: dict, config: RunnableConfig | None = None) -> dict:
     context = state.get("parent_context") or {}
     policy = SectionPolicy(
         max_search_rounds=settings.agent.section_max_search_rounds,
@@ -156,15 +206,19 @@ async def plan_sections(state: dict) -> dict:
         }
     maximum = settings.agent.section_max_count
     available = {s["section_id"] for s in context.get("handoff", [])}
-    plan, cost = await agent_registry.planner.run(
+    result = await agent_runner.run(
+        agent_registry.planner,
         SectionPlanningRequest(
             research_question=state["research_question"],
             maximum_sections=maximum,
             parent_view=_parent_view(state),
             available_parent_section_ids=frozenset(available),
         ),
-        call_model=call_model,
+        context=_agent_context(config),
     )
+    plan = result.output
+    if plan is None:
+        raise RuntimeError("PlannerAgent 未返回章节计划")
     sections = [
         SectionRecord(**spec.model_dump(), section_id=f"section_{i}").model_dump(mode="json")
         for i, spec in enumerate(plan.sections, 1)
@@ -176,12 +230,13 @@ async def plan_sections(state: dict) -> dict:
     return {
         "sections": sections, "active_section": 0,
         "section_policy": policy.model_dump(), "section_step": "research",
-        **_usage(state, cost),
+        **_usage(state, result.usage),
     }
 
 
-async def research_section(state: dict) -> dict:
+async def research_section(state: dict, config: RunnableConfig | None = None) -> dict:
     section = _current(state)
+    initial_search_rounds = section.search_rounds
     section.status = "researching"
     if section.search_rounds == 0 and not (state.get("parent_context") or {}).get("revision_target"):
         context = state.get("parent_context") or {}
@@ -195,42 +250,85 @@ async def research_section(state: dict) -> dict:
         section.results = merge_results(section.results, inherited)
     operation = (state.get("parent_context") or {}).get("section_operation")
     force_search = operation and operation["target"] == section.section_id and operation["mode"] in {"refresh", "supplement"}
-    if section.kind == "synthesis" and section.search_rounds == 0 and not force_search:
+    analyze_existing = bool(
+        operation
+        and operation["mode"] == "continue"
+        and section.results
+    )
+    synthesis_handoff = section.kind == "synthesis" and section.search_rounds == 0 and not force_search
+    if synthesis_handoff:
         # Synthesis waits for all previous chapters and reads their selected source material.
         section.results = merge_results(section.results, [
             source for prior in state["sections"][:state["active_section"]]
             if prior["section_id"] in section.depends_on
             for source in prior["sources"]
         ])
-    else:
-        retrieval_context = (operation.get("retrieval_context") if operation and operation["mode"] == "continue"
-                             else state.get("parent_context"))
-        retrieved = await retrieve_evidence(
-            RetrievalRequest(
-                question=section.question,
-                gaps=tuple(section.gaps[:2]),
-                parent_question=str(
-                    (retrieval_context or {}).get("source_question", "")
-                ).strip(),
-                iteration=section.search_rounds,
-                scope={
-                    "section_id": section.section_id,
-                    "revision": section.revision,
-                    "round": section.search_rounds,
-                },
-                existing_count=len(section.results),
-            )
+        # Count deterministic synthesis handoff as the chapter's only research round.
+        section.search_rounds += 1
+    retrieval_context = (operation.get("retrieval_context") if operation and operation["mode"] == "continue"
+                         else state.get("parent_context"))
+    result = await agent_runner.run(
+        agent_registry.evidence_research,
+        EvidenceResearchRequest(
+            section_id=section.section_id,
+            question=section.question,
+            section_context=_prompt(state, section),
+            initial_results=tuple(section.results),
+            initial_gaps=tuple(section.gaps[:2]),
+            parent_question=str((retrieval_context or {}).get("source_question", "")).strip(),
+            starting_round=section.search_rounds,
+            max_search_rounds=_policy(state).max_search_rounds,
+            revision=section.revision,
+            allow_retrieval=True,
+            skip_retrieval_on_first_turn=synthesis_handoff or analyze_existing,
+            stop_after_one_round=bool(operation and operation["mode"] == "supplement"),
+            require_fresh_results=bool(force_search),
+        ),
+        context=await _resumable_agent_context(
+            agent_registry.evidence_research.spec.name,
+            config,
+            section_id=section.section_id,
+        ),
+    )
+    research = result.output
+    if research is None:
+        raise RuntimeError("EvidenceResearchAgent 未返回研究结果")
+    section.results = list(research.results)
+    section.search_rounds = research.search_rounds
+    section.analyst = research.review.model_dump(mode="json")
+    section.gaps = list(research.review.search_queries)
+    if force_search:
+        section.evidence_update = {
+            "mode": operation["mode"],
+            "result_count": len(research.fresh_result_ids),
+            "source_ids": list(research.fresh_result_ids),
+            "retrieved_at": datetime.now(timezone.utc).isoformat(),
+        }
+    if operation and operation["mode"] == "supplement":
+        section.status = (
+            "evidence_ready"
+            if section.results and research.review.verdict == "pass"
+            else "waiting_evidence"
         )
-        if force_search:
-            section.evidence_update = {"mode": operation["mode"], "result_count": len(retrieved),
-                                       "source_ids": [evidence_key(r) for r in retrieved],
-                                       "retrieved_at": datetime.now(timezone.utc).isoformat()}
-        # Fresh retrieval supersedes an identical inherited excerpt's provenance.
-        section.results = merge_results(stamp_results(retrieved), section.results)
-    section.search_rounds += 1
+        section.limitations = list(research.review.issues)
+        next_step = "assemble"
+    else:
+        if research.review.verdict == "revise":
+            section.limitations = list(dict.fromkeys(
+                section.limitations + research.review.issues
+            ))
+            if not research.review.issues:
+                section.limitations.append("检索预算已用完，证据审查未通过")
+        next_step = "write"
     return _update(
-        state, section, "analyze",
-        iteration_count=state.get("iteration_count", 0) + 1,
+        state,
+        section,
+        next_step,
+        iteration_count=(
+            state.get("iteration_count", 0)
+            + max(0, section.search_rounds - initial_search_rounds)
+        ),
+        **_usage(state, result.usage),
     )
 
 
@@ -244,42 +342,7 @@ def _select_sources(section: SectionRecord) -> list[dict]:
     return merge_results(fresh, ranked)[:15]
 
 
-async def analyze_section(state: dict) -> dict:
-    section = _current(state)
-    selected = _select_sources(section)
-    analysis = await agent_registry.evidence_analyst.run(
-        EvidenceAnalysisRequest(
-            section_id=section.section_id,
-            section_context=_prompt(state, section),
-            evidence_text=_evidence_text(selected),
-        ),
-        call_model=call_model,
-    )
-    review, cost = analysis.review, analysis.cost
-    if not selected:
-        review.verdict = "revise"
-        review.issues = list(dict.fromkeys(["未检索到可用证据"] + review.issues))[:8]
-        review.search_queries = review.search_queries or [section.question]
-    section.analyst = review.model_dump()
-    section.gaps = review.search_queries
-    operation = (state.get("parent_context") or {}).get("section_operation")
-    if operation and operation["mode"] == "supplement":
-        if not section.evidence_update.get("result_count"):
-            review.verdict = "revise"
-            review.issues = list(dict.fromkeys(["本次检索没有返回可用新结果；旧来源不等于已补齐证据"] + review.issues))[:8]
-            section.analyst = review.model_dump()
-        section.status = "evidence_ready" if selected and review.verdict == "pass" else "waiting_evidence"
-        section.limitations = list(review.issues)
-        return _update(state, section, "assemble", **_usage(state, cost))
-    retry = review.verdict == "revise" and section.search_rounds < _policy(state).max_search_rounds
-    if review.verdict == "revise" and not retry:
-        section.limitations = list(dict.fromkeys(section.limitations + review.issues))
-        if not review.issues:
-            section.limitations.append("检索预算已用完，证据审查未通过")
-    return _update(state, section, "research" if retry else "write", **_usage(state, cost))
-
-
-async def write_section(state: dict) -> dict:
+async def write_section(state: dict, config: RunnableConfig | None = None) -> dict:
     section = _current(state)
     selected = _select_sources(section)
     if not selected:
@@ -295,7 +358,8 @@ async def write_section(state: dict) -> dict:
         section.limitations = list(dict.fromkeys(section.limitations + ["未检索到可用证据"]))
         section.status = "limited"
         return _update(state, section, "advance")
-    writing = await agent_registry.section_writer.run(
+    result = await agent_runner.run(
+        agent_registry.section_writer,
         SectionWritingRequest(
             section_id=section.section_id,
             next_revision=section.revision + 1,
@@ -307,9 +371,16 @@ async def write_section(state: dict) -> dict:
             previous_sources=tuple(section.sources),
             review=section.review,
         ),
-        call_model=call_model,
+        context=await _resumable_agent_context(
+            agent_registry.section_writer.spec.name,
+            config,
+            section_id=section.section_id,
+        ),
     )
-    draft, cost = writing.draft, writing.cost
+    writing = result.output
+    if writing is None:
+        raise RuntimeError("SectionWriterAgent 未返回通过校验的章节正文")
+    draft = writing.draft
     _archive_draft(section)
     section.draft = draft
     section.sources = selected
@@ -318,21 +389,24 @@ async def write_section(state: dict) -> dict:
     section.reviewed_at = None
     section.revision += 1
     section.status = "drafted"
-    return _update(state, section, "review", **_usage(state, cost))
+    return _update(state, section, "review", **_usage(state, result.usage))
 
 
-async def review_section(state: dict) -> dict:
+async def review_section(state: dict, config: RunnableConfig | None = None) -> dict:
     section = _current(state)
-    review_result = await agent_registry.section_reviewer.run(
+    result = await agent_runner.run(
+        agent_registry.section_reviewer,
         SectionReviewRequest(
             section_id=section.section_id,
             section_context=_prompt(state, section),
             evidence_text=_evidence_text(section.sources),
             draft=section.draft,
         ),
-        call_model=call_model,
+        context=_agent_context(config, section_id=section.section_id),
     )
-    review, cost = review_result.review, review_result.cost
+    review = result.output
+    if review is None:
+        raise RuntimeError("SectionReviewerAgent 未返回章节审校结果")
     invalid = citation_issues(section.draft, section.sources)
     if invalid:
         review.verdict = "revise"
@@ -345,7 +419,7 @@ async def review_section(state: dict) -> dict:
             "research" if review.search_queries and section.search_rounds < policy.max_search_rounds
             else "write"
         )
-        return _update(state, section, step, **_usage(state, cost))
+        return _update(state, section, step, **_usage(state, result.usage))
     if invalid:
         raise ValueError("chapter citation validation failed: " + "; ".join(invalid))
     if review.verdict == "revise":
@@ -355,7 +429,7 @@ async def review_section(state: dict) -> dict:
     section.status = "limited" if section.limitations else "complete"
     section.dependency_revisions = _dependencies(state, section)
     section.status = "drafted"  # Claim validation is still pending.
-    return _update(state, section, "claims", **_usage(state, cost))
+    return _update(state, section, "claims", **_usage(state, result.usage))
 
 
 def _archive_draft(section: SectionRecord) -> None:
@@ -368,40 +442,24 @@ def _archive_draft(section: SectionRecord) -> None:
 
 async def extract_claims(state: dict) -> dict:
     section = _current(state)
-    work = deepcopy(section.claim_work)
-    if not work or work.get("fingerprint") != claim_repair.fingerprint(section):
-        work = claim_repair.new_work(section)
-    if work["epoch"] != claim_repair.epoch():
-        work.update(epoch=claim_repair.epoch(), attempts=0)
-    if work["attempts"] >= 3:
-        raise claim_repair.ClaimsPending(section)
-    extraction = await agent_registry.claim_extractor.run(
-        ClaimExtractionRequest(
+    binding = await claim_binding_processor.process_attempt(
+        ClaimBindingRequest(
             section=section,
             section_context=_prompt(state, section),
             evidence_text=_evidence_text(section.sources),
-            work=work,
-            attempt=work["attempts"] + 1,
-            total_attempt=work["total_attempts"] + 1,
         ),
         call_model=call_model,
     )
-    work, cost = extraction.work, extraction.cost
-    work["attempts"] += 1
-    work["total_attempts"] += 1
-    section.claim_work = work
-    section.claims = [ClaimExtraction(claims=[work["accepted"][key]]).claims[0]
-                      for key in sorted(work["accepted"], key=int)]
-    if work["pending"] or work["batch_errors"]:
+    section.claim_work = binding.work
+    section.claims = list(binding.claims)
+    if not binding.completed:
         section.status = "claims_pending"
-        return _update(state, section, "claim_gate", **_usage(state, cost))
+        return _update(state, section, "claim_gate", **_usage(state, binding.cost))
     section.reviewed_at = datetime.now(timezone.utc)
-    for claim in section.claims:
-        if claim.assessment != "supported":
-            section.limitations.append(f"结论 {claim.claim_id}：{claim.caveat or '证据支持不足'}")
+    section.limitations.extend(binding.limitations)
     section.limitations = list(dict.fromkeys(section.limitations))
     section.status = "limited" if section.limitations else "complete"
-    return _update(state, section, "advance", **_usage(state, cost))
+    return _update(state, section, "advance", **_usage(state, binding.cost))
 
 
 def claim_gate(state: dict) -> dict:
@@ -412,24 +470,28 @@ def claim_gate(state: dict) -> dict:
     return {"section_step": "claims"}
 
 
-async def review_report(state: dict) -> dict:
+async def review_report(state: dict, config: RunnableConfig | None = None) -> dict:
     sections = [SectionRecord.model_validate(s) for s in state["sections"]]
     stale = dependency_issues(sections)
     if stale:
         raise ValueError("; ".join(stale))
     if any(s.status not in {"complete", "limited"} for s in sections):
         raise ValueError("cannot review unfinished or stale chapters")
-    result = await agent_registry.report_reviewer.run(
+    result = await agent_runner.run(
+        agent_registry.report_reviewer,
         ReportReviewRequest(
             research_question=state["research_question"],
             sections=tuple(sections),
         ),
-        call_model=call_model,
+        context=_agent_context(config),
     )
+    review = result.output
+    if review is None:
+        raise RuntimeError("ReportReviewerAgent 未返回全篇审校结果")
     return {
-        "report_review": result.review.model_dump(mode="json"),
+        "report_review": review.model_dump(mode="json"),
         "section_step": "assemble",
-        **_usage(state, result.cost),
+        **_usage(state, result.usage),
     }
 
 
@@ -472,11 +534,15 @@ def assemble_sections(state: dict) -> dict:
     }
 
 
-def route_section(state: dict) -> str:
-    return {
-        "research": "section_search", "analyze": "section_analyze",
-        "write": "section_write", "review": "section_review",
-        "advance": "section_advance", "assemble": "assemble_report",
-        "claims": "section_claims", "report_review": "report_review",
-        "claim_gate": "section_claim_gate",
-    }[state["section_step"]]
+def route_parent(state: dict) -> str:
+    """Route only between parent-level planning, chapter, and report boundaries."""
+    step = state["section_step"]
+    if step in {
+        "research", "write", "review", "advance", "claims", "claim_gate",
+    }:
+        return "section_cycle"
+    if step == "report_review":
+        return "report_review"
+    if step == "assemble":
+        return "assemble_report"
+    raise ValueError(f"父图无法处理 section_step={step!r}")

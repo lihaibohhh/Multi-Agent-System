@@ -131,17 +131,34 @@ async def chapter(state):
              accepted=data["accepted"], tokens=data["tokens"],
              errors=[{k: e.get(k) for k in ("field", "type")} for e in data["errors"]])
     audit_token = attempt_sink.set(sink)
-    nodes = {"research": workflow.research_section, "analyze": workflow.analyze_section,
-             "write": workflow.write_section, "review": workflow.review_section, "claims": workflow.extract_claims}
+    async_nodes = {
+        "research": workflow.research_section,
+        "write": workflow.write_section,
+        "review": workflow.review_section,
+    }
+    sync_nodes = {
+        "claims": workflow.extract_claims,
+        "claim_gate": workflow.claim_gate,
+        "advance": workflow.advance_section,
+    }
+    # The historical v4 checkpoint could stop at the removed analyze node. In the
+    # current flow EvidenceResearchAgent owns retrieval and evidence analysis together.
+    if state.get("section_step") == "analyze":
+        state["section_step"] = "research"
+    config = {"configurable": {"thread_id": record.run_id}}
     try:
         async with asyncio.timeout(900):
-            for _ in range(12):
+            for _ in range(16):
                 step = state["section_step"]
                 if step == "advance":
                     break
                 emit("node_start", step=step)
                 started = time.monotonic()
-                state.update(await nodes[step](state))
+                if step in async_nodes:
+                    state.update(await async_nodes[step](state, config))
+                else:
+                    result = sync_nodes[step](state)
+                    state.update(await result if asyncio.iscoroutine(result) else result)
                 s = state["sections"][state["active_section"]]
                 emit("node_done", step=step, elapsed=round(time.monotonic()-started, 3),
                      next=state["section_step"], status=s["status"], results=len(s["results"]),

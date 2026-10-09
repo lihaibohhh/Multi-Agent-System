@@ -418,6 +418,10 @@ input[readonly] {
   background: #0d141c;
 }
 
+.agent.processor {
+  border-style: dashed;
+}
+
 .agent-name {
   min-width: 0;
   flex-wrap: wrap;

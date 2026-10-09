@@ -69,7 +69,7 @@ def continue_step(section, policy):
     if section.status == "drafted" and section.draft:
         return "review"
     if section.results:
-        return "analyze"
+        return "research"
     if section.search_rounds >= policy.max_search_rounds:
         return "write"
     return "research"

@@ -99,11 +99,13 @@ async def test_continue_uses_checkpoint_not_lagging_projection_and_leaves_other_
     sections[0].update(status="pending", draft="", revision=0)
     sections[1].update(status="researching", search_rounds=1, draft="", revision=0)
     sections[2].update(status="pending", draft="", revision=0)
-    state.update(sections=sections, active_section=1, section_step="analyze",
+    state.update(sections=sections, active_section=1, section_step="research",
                  section_policy={"max_search_rounds": 1, "max_revisions": 0})
     # A new fixture Run with a checkpoint ahead of its deliberately empty projection.
     parent = await service.create_run(question="分析公司X竞争优势", run_id="unfinished")
-    await app.aupdate_state(streaming.research_config(parent.run_id, state), state, as_node="section_search")
+    await app.aupdate_state(
+        streaming.research_config(parent.run_id, state), state, as_node="plan_sections"
+    )
     store.runs[parent.run_id].status = RunStatus.PAUSED
     child = await service.create_section_operation(parent.run_id, "section_2", mode="continue",
         instruction="仅继续渠道章节研究")

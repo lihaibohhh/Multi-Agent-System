@@ -6,6 +6,7 @@ from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from multi_agent_research.core import streaming
 from multi_agent_research.core.graph import build_graph
 from multi_agent_research.core.state import initial_state
+from multi_agent_research.agents import AgentTurnLimitError
 from multi_agent_research.sections import workflow
 from multi_agent_research.sections.models import (
     ClaimExtraction,
@@ -132,10 +133,11 @@ async def test_resume_from_sqlite_preserves_completed_chapter_and_draft(monkeypa
         app = build_graph(saver)
         with pytest.raises(RuntimeError, match="writer outage"):
             await app.ainvoke(state, config)
-        snapshot = await app.aget_state(config)
+        snapshot = await app.aget_state(config, subgraphs=True)
         assert snapshot.values["sections"][0]["status"] == "complete"
         assert snapshot.values["sections"][0]["draft"]
-        assert snapshot.next == ("section_write",)
+        assert snapshot.next == ("section_cycle",)
+        assert snapshot.tasks[0].state.next == ("section_write",)
 
     # A new saver and compiled graph model a process restart, not just another call.
     async with AsyncSqliteSaver.from_conn_string(database) as saver:
@@ -189,21 +191,56 @@ async def test_no_results_produces_explicit_limitations_not_fake_findings(monkey
 
 
 @pytest.mark.asyncio
+async def test_continue_analyzes_persisted_results_before_any_new_retrieval(monkeypatch):
+    fake = FakeModels()
+    install(monkeypatch, fake)
+    state = initial_state("补充公司X成本证据")
+    section = SectionRecord(
+        section_id="section_1",
+        title="成本",
+        question="公司X的成本优势如何",
+        status="researching",
+        search_rounds=1,
+        results=[evidence("fresh")],
+        evidence_update={"mode": "supplement", "result_count": 1},
+    )
+    state.update(
+        sections=[section.model_dump(mode="json")],
+        section_policy={"max_search_rounds": 2, "max_revisions": 1},
+        section_step="research",
+        parent_context={
+            "section_operation": {
+                "mode": "continue",
+                "target": "section_1",
+                "retrieval_context": {},
+            }
+        },
+    )
+
+    result = await workflow.research_section(state)
+
+    updated = result["sections"][0]
+    assert result["section_step"] == "write"
+    assert updated["status"] == "researching"
+    assert updated["analyst"]["verdict"] == "pass"
+    assert fake.calls["search"] == 0
+
+
+@pytest.mark.asyncio
 async def test_invalid_citation_never_completes_run(monkeypatch):
     fake = FakeModels()
     install(monkeypatch, fake)
 
     async def wrong_citations(system, prompt, schema=None, **kwargs):
         if schema is None:
-            output = "无效结论[来源99]"
-            return kwargs["validator"](output), {"tokens": 10, "unknown": 0}
+            return "无效结论[来源99]", {"tokens": 10, "unknown": 0}
         return await fake.model(system, prompt, schema, **kwargs)
 
     monkeypatch.setattr(workflow, "call_model", wrong_citations)
     state = initial_state("分析公司X竞争优势")
     app = build_graph()
     config = streaming.research_config("bad-citation", state)
-    with pytest.raises(ValueError, match="draft.citations"):
+    with pytest.raises(AgentTurnLimitError, match="3 个 turn"):
         await app.ainvoke(state, config)
     snapshot = await app.aget_state(config)
     assert snapshot.values["writer_status"] == "not_started"

@@ -8,35 +8,30 @@ from langgraph.graph import StateGraph, END
 from .state import ResearchState, initial_state
 from .run_context import checkpoint_config, ensure_new_run, normalize_run_id
 from ..sections import workflow as chapters
+from ..sections.subgraph import compile_section_subgraph
 
 
 logger = logging.getLogger(__name__)
 
 
 def _build_state_graph() -> StateGraph:
-    """Build the current serial chapter workflow without legacy routes."""
+    """Build the parent workflow around one checkpointed serial chapter subgraph."""
     graph = StateGraph(ResearchState)
 
     graph.add_node("plan_sections", chapters.plan_sections)
-    graph.add_node("section_search", chapters.research_section)
-    graph.add_node("section_analyze", chapters.analyze_section)
-    graph.add_node("section_write", chapters.write_section)
-    graph.add_node("section_review", chapters.review_section)
-    graph.add_node("section_advance", chapters.advance_section)
-    graph.add_node("section_claims", chapters.extract_claims)
-    graph.add_node("section_claim_gate", chapters.claim_gate)
+    graph.add_node("section_cycle", compile_section_subgraph())
     graph.add_node("report_review", chapters.review_report)
     graph.add_node("assemble_report", chapters.assemble_sections)
     graph.set_entry_point("plan_sections")
-    chapter_routes = {name: name for name in (
-        "section_search", "section_analyze", "section_write", "section_review",
-        "section_advance", "assemble_report",
-        "section_claims", "report_review",
-        "section_claim_gate",
-    )}
-    for node in ("plan_sections", "section_search", "section_analyze", "section_write",
-                 "section_review", "section_advance", "section_claims", "section_claim_gate", "report_review"):
-        graph.add_conditional_edges(node, chapters.route_section, chapter_routes)
+
+    parent_routes = {
+        "section_cycle": "section_cycle",
+        "report_review": "report_review",
+        "assemble_report": "assemble_report",
+    }
+    graph.add_conditional_edges("plan_sections", chapters.route_parent, parent_routes)
+    graph.add_conditional_edges("section_cycle", chapters.route_parent, parent_routes)
+    graph.add_conditional_edges("report_review", chapters.route_parent, parent_routes)
     graph.add_edge("assemble_report", END)
 
     return graph

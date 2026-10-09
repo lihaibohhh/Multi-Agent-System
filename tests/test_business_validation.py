@@ -264,8 +264,11 @@ async def test_full_graph_schema_parser_business_audit_failure_restart_and_assem
             rejected = [r for r in store.diagnostics if r["business_status"] == "partial"]
             assert len(rejected) == 3 and all(not r["accepted"] for r in rejected)
             assert failed.sections[1].claim_work['attempts'] == 3
-            snapshot = await app.aget_state(streaming.checkpoint_config("business-e2e"))
-            assert snapshot.next == ("section_claim_gate",)
+            snapshot = await app.aget_state(
+                streaming.checkpoint_config("business-e2e"), subgraphs=True
+            )
+            assert snapshot.next == ("section_cycle",)
+            assert snapshot.tasks[0].state.next == ("section_claim_gate",)
         broken = False
         async with AsyncSqliteSaver.from_conn_string(database) as saver:
             app = build_graph(saver)

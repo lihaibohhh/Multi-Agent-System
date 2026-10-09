@@ -18,6 +18,7 @@ def test_session_and_run_lifecycle_routes_are_exposed() -> None:
         "/api/runs/{run_id}/budget/migrate",
         "/api/runs/{run_id}/stream",
         "/api/runs/{run_id}/snapshot",
+        "/api/runs/{run_id}/agent-trace",
         "/api/runs/{run_id}/sections/{section_id}/revisions",
     }
     assert expected <= set(paths)

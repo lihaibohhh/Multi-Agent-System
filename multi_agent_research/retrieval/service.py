@@ -23,8 +23,8 @@ logger = logging.getLogger(__name__)
 # § 1  配置常量
 # ─────────────────────────────────────────────
 tools_con = settings.tools
-_WEB_MAX_RESULTS: int = 5       # Tavily 单次最多返回条数
-_WEB_MAX_RETRIES: int = 2       # Tavily 临时错误（超时/连接）最大重试次数
+_WEB_MAX_RESULTS: int = tools_con.search.max_results
+_WEB_MAX_RETRIES: int = tools_con.search.max_retries
 _WEB_RETRY_DELAY: float = 1.0   # 重试间隔（秒）
 
 
