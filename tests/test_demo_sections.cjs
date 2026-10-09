@@ -5,6 +5,15 @@ const { readFileSync } = require('node:fs');
 const { join } = require('node:path');
 const vm = require('node:vm');
 
+test('pipeline lists six role agents and labels retrieval as non-agent', () => {
+  const html = readFileSync(join(__dirname, '../multi_agent_research/api/static/index.html'), 'utf8');
+  for (const id of ['planner', 'evidence-analyst', 'section-writer', 'section-reviewer', 'claim-extractor', 'report-reviewer']) {
+    assert.match(html, new RegExp(`id="agent-${id}"`));
+  }
+  assert.doesNotMatch(html, /id="agent-(?:supervisor|search|analyst|writer)"/);
+  assert.match(html, /非 Agent：Retrieval Service/);
+});
+
 function setup() {
   class Element {
     constructor(tag = 'div') {

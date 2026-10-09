@@ -1,7 +1,4 @@
-"""
-graph.py — 章节研究图与旧版 Supervisor 图的组装入口
-把所有节点和边连接成完整的 LangGraph StateGraph。
-"""
+"""Build the single supported, checkpointed chapter research graph."""
 
 from __future__ import annotations
 import asyncio
@@ -10,10 +7,6 @@ from langgraph.graph import StateGraph, END
 
 from .state import ResearchState, initial_state
 from .run_context import checkpoint_config, ensure_new_run, normalize_run_id
-from .supervisor import supervisor_node, route_from_supervisor, route_from_search
-from ..agents.search_agent import search_agent_node
-from ..agents.analyst_agent import analyst_agent_node
-from ..agents.writer_agent import writer_agent_node
 from ..sections import workflow as chapters
 
 
@@ -21,19 +14,9 @@ logger = logging.getLogger(__name__)
 
 
 def _build_state_graph() -> StateGraph:
-    """
-    构建图定义。新任务按章节串行检索、分析、写作、审校，再确定性装配。
-    旧版节点和边保留，以支持没有 workflow_version=2 的历史 Checkpoint。
-    """
+    """Build the current serial chapter workflow without legacy routes."""
     graph = StateGraph(ResearchState)
 
-    # ── 注册节点 ─────────────────────────────────
-    graph.add_node("supervisor", supervisor_node)
-    graph.add_node("search_agent", search_agent_node)
-    graph.add_node("analyst_agent", analyst_agent_node)
-    graph.add_node("writer_agent", writer_agent_node)
-
-    # ── 入口点 ───────────────────────────────────
     graph.add_node("plan_sections", chapters.plan_sections)
     graph.add_node("section_search", chapters.research_section)
     graph.add_node("section_analyze", chapters.analyze_section)
@@ -44,11 +27,7 @@ def _build_state_graph() -> StateGraph:
     graph.add_node("section_claim_gate", chapters.claim_gate)
     graph.add_node("report_review", chapters.review_report)
     graph.add_node("assemble_report", chapters.assemble_sections)
-    # Missing version denotes an old checkpoint. Keep its node names and edges intact.
-    graph.set_conditional_entry_point(
-        lambda state: "plan_sections" if state.get("workflow_version") in {2, 3} else "supervisor",
-        {"plan_sections": "plan_sections", "supervisor": "supervisor"},
-    )
+    graph.set_entry_point("plan_sections")
     chapter_routes = {name: name for name in (
         "section_search", "section_analyze", "section_write", "section_review",
         "section_advance", "assemble_report",
@@ -59,30 +38,6 @@ def _build_state_graph() -> StateGraph:
                  "section_review", "section_advance", "section_claims", "section_claim_gate", "report_review"):
         graph.add_conditional_edges(node, chapters.route_section, chapter_routes)
     graph.add_edge("assemble_report", END)
-
-    # ── Supervisor 的条件路由 ─────────────────────
-    graph.add_conditional_edges(
-        "supervisor",
-        route_from_supervisor,          # 返回 "search_agent" / "analyst_agent" / "writer_agent" / END
-        {
-            "search_agent": "search_agent",
-            "analyst_agent": "analyst_agent",
-            "writer_agent": "writer_agent",
-            END: END,
-        },
-    )
-
-    # ── Search / Analyst 进入控制环；Writer 完成后结束 ──
-    graph.add_conditional_edges(
-        "search_agent",
-        route_from_search,  # 新增路由函数
-        {
-            "analyst_agent": "analyst_agent",
-            "supervisor": "supervisor",
-        }
-    )
-    graph.add_edge("analyst_agent", "supervisor")
-    graph.add_edge("writer_agent", END)
 
     return graph
 

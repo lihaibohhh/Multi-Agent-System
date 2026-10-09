@@ -61,7 +61,7 @@
 
 两次均得到 `CallTimeout`、`state_unchanged=true`。第二次不是复用第一次的三条结果，而是再次请求真实服务。
 
-原因：`agents/search_agent.py:229` 等待整批 `gather_cancel_on_error` 成功才整理结果，`sections/workflow.py:195` 在整个检索节点返回后才合并。已有章节 Checkpoint 不能替代节点内部的逐查询成果存储。
+原因：检索服务等待整批 `gather_cancel_on_error` 成功才整理结果，章节工作流在整个检索调用返回后才合并。已有章节 Checkpoint 不能替代节点内部的逐查询成果存储。
 
 本组测试验证的是实际函数的结果提交边界和重复请求，不是 PostgreSQL 断电恢复测试；没有对原 Run 的持久化预算做预留或结算。
 

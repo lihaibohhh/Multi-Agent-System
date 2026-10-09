@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "multi-agent-research"
 version = "0.1.0"
-description = "A LangGraph-based supervisor multi-agent research system."
+description = "A checkpointed, role-based multi-agent research system built on LangGraph."
 readme = "README.md"
 requires-python = ">=3.11,<3.12"
 dependencies = [

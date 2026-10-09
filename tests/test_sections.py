@@ -8,15 +8,22 @@ from multi_agent_research.core.graph import build_graph
 from multi_agent_research.core.state import initial_state
 from multi_agent_research.sections import workflow
 from multi_agent_research.sections.models import (
-    ClaimExtraction, ReportReview, SectionPlan, SectionRecord, SectionReview,
+    ClaimExtraction,
+    ReportReview,
+    SectionPlan,
+    SectionRecord,
+    SectionReview,
 )
 from multi_agent_research.sections.rendering import assemble_report, merge_results
 
 
 def evidence(name, score=0.9):
     return {
-        "query": name, "source": "knowledge", "content": f"{name} 的实际证据摘录",
-        "score": score, "iteration": 0,
+        "query": name,
+        "source": "knowledge",
+        "content": f"{name} 的实际证据摘录",
+        "score": score,
+        "iteration": 0,
         "metadata": {"source": f"{name}.pdf", "page": 2, "chunk_id": f"{name}::2"},
     }
 
@@ -40,20 +47,32 @@ class FakeModels:
             return ReportReview(verdict="pass", summary="全篇口径一致"), cost
         if schema is SectionPlan:
             self.calls["plan"] += 1
-            return SectionPlan(sections=[
-                {"title": "成本", "question": "公司X的成本优势如何"},
-                {"title": "渠道", "question": "公司X的渠道优势如何"},
-                {"title": "结论", "question": "公司X的整体优势是否持续", "kind": "synthesis"},
-            ]), cost
+            return SectionPlan(
+                sections=[
+                    {"title": "成本", "question": "公司X的成本优势如何"},
+                    {"title": "渠道", "question": "公司X的渠道优势如何"},
+                    {"title": "结论", "question": "公司X的整体优势是否持续", "kind": "synthesis"},
+                ]
+            ), cost
         chapter = next(name for name in ("成本", "渠道", "结论") if f"本章：{name}\n" in prompt)
         if schema is ClaimExtraction:
             self.calls[f"claims:{chapter}"] += 1
-            return ClaimExtraction(claims=[{
-                "statement": f"{chapter}的分析结论", "draft_quote": f"{chapter}的分析结论",
-                "assessment": "supported", "evidence": [{
-                    "source_number": 1, "quote": "的实际证据摘录", "relation": "supports",
-                }],
-            }]), cost
+            return ClaimExtraction(
+                claims=[
+                    {
+                        "statement": f"{chapter}的分析结论",
+                        "draft_quote": f"{chapter}的分析结论",
+                        "assessment": "supported",
+                        "evidence": [
+                            {
+                                "source_number": 1,
+                                "quote": "的实际证据摘录",
+                                "relation": "supports",
+                            }
+                        ],
+                    }
+                ]
+            ), cost
         if schema is SectionReview:
             stage = "review" if "核查章节草稿" in system else "analyze"
             self.calls[f"{stage}:{chapter}"] += 1
@@ -70,15 +89,15 @@ class FakeModels:
             raise RuntimeError("simulated writer outage")
         return f"{chapter}的分析结论[来源1]。", cost
 
-    async def search(self, state):
-        self.questions.append(state["research_question"])
+    async def search(self, request):
+        self.questions.append(request.question)
         self.calls["search"] += 1
-        return {"search_results": [] if self.no_results else [evidence(state["research_question"])]}
+        return [] if self.no_results else [evidence(request.question)]
 
 
 def install(monkeypatch, fake):
     monkeypatch.setattr(workflow, "call_model", fake.model)
-    monkeypatch.setattr(workflow, "search_agent_node", fake.search)
+    monkeypatch.setattr(workflow, "retrieve_evidence", fake.search)
     monkeypatch.setattr(workflow.settings.agent, "section_max_count", 4)
     monkeypatch.setattr(workflow.settings.agent, "section_max_search_rounds", 2)
     monkeypatch.setattr(workflow.settings.agent, "section_max_revisions", 1)
@@ -194,10 +213,22 @@ async def test_invalid_citation_never_completes_run(monkeypatch):
 
 def test_assembly_preserves_paragraphs_and_renumbers_shared_evidence():
     a, b = evidence("A"), evidence("B")
-    first = SectionRecord(section_id="1", title="甲", question="研究第一个问题",
-                          draft="甲[来源1]", sources=[a], status="complete")
-    second = SectionRecord(section_id="2", title="乙", question="研究第二个问题",
-                           draft="乙[来源1]；再看甲[来源2]", sources=[b, a], status="complete")
+    first = SectionRecord(
+        section_id="1",
+        title="甲",
+        question="研究第一个问题",
+        draft="甲[来源1]",
+        sources=[a],
+        status="complete",
+    )
+    second = SectionRecord(
+        section_id="2",
+        title="乙",
+        question="研究第二个问题",
+        draft="乙[来源1]；再看甲[来源2]",
+        sources=[b, a],
+        status="complete",
+    )
     report = assemble_report("研究问题", [first, second])
     assert "乙[来源2]；再看甲[来源1]" in report
     assert report.count("chunk_id: A::2") == 1
@@ -221,30 +252,16 @@ async def test_new_stream_publishes_sections_and_final_snapshot(monkeypatch):
         return app
 
     monkeypatch.setattr(streaming, "_get_app", get_app)
-    events = [event async for event in streaming.astream_research("研究公司X竞争优势", "stream-chapters")]
+    events = [
+        event async for event in streaming.astream_research("研究公司X竞争优势", "stream-chapters")
+    ]
     assert events[0][0] == "start"
     assert events[1][0] == "section_plan"
-    assert any(kind == "section_progress" and any(s["draft"] for s in data["sections"])
-               for kind, data in events)
+    assert any(
+        kind == "section_progress" and any(s["draft"] for s in data["sections"])
+        for kind, data in events
+    )
     assert [kind for kind, _ in events][-2:] == ["report_ready", "done"]
     assert events[-1][1]["report_quality"] == "reviewed"
     assert events[-1][1]["total_results"] == 4  # two local + two synthesis observations
-
-
-@pytest.mark.asyncio
-async def test_existing_checkpoint_uses_legacy_nodes(monkeypatch):
-    from multi_agent_research.core import graph as graph_module
-    from multi_agent_research.core.run_context import checkpoint_config
-
-    async def old_supervisor(state):
-        return {"next_agent": "writer_agent"}
-
-    async def old_writer(state):
-        return {"final_report": "旧流程报告", "writer_status": "complete"}
-
-    monkeypatch.setattr(graph_module, "supervisor_node", old_supervisor)
-    monkeypatch.setattr(graph_module, "writer_agent_node", old_writer)
-    legacy = initial_state("旧任务研究问题")
-    legacy.pop("workflow_version")
-    result = await build_graph().ainvoke(legacy, checkpoint_config("legacy-run"))
-    assert result["final_report"] == "旧流程报告"
+    assert all(kind != "supervisor_decision" for kind, _ in events)

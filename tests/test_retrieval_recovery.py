@@ -6,13 +6,13 @@ from copy import deepcopy
 import pytest
 from pydantic import SecretStr
 
-from multi_agent_research.agents import search_agent
 from multi_agent_research.core.budget import BudgetExceeded, RunControlError
 from multi_agent_research.core.config import settings
 from multi_agent_research.core.retrieval import (
     RetrievalDeferred, RetrievalFailed, durable_retrieval, operation_key,
 )
-from multi_agent_research.core.state import AnalystVerdict
+from multi_agent_research.retrieval import RetrievalRequest
+from multi_agent_research.retrieval import service as retrieval_service
 from multi_agent_research.runs.models import RunStatus
 from multi_agent_research.sections.artifacts import stamp_results
 from tests.test_run_budget import scope_for
@@ -44,16 +44,18 @@ async def test_mixed_batch_resume_reuses_success_and_only_retries_failed_query(m
         if q == "question":
             await asyncio.sleep(0.03)
         return [evidence(q)]
-    monkeypatch.setattr(search_agent, "_knowledge_search", search)
+    monkeypatch.setattr(retrieval_service, "_knowledge_search", search)
     monkeypatch.setattr(settings.tool_secrets, "tavily_api_key", SecretStr(""))
-    state = {"research_question": "question", "analyst_verdict": AnalystVerdict(
-        verdict="revise", specific_gaps=["gap"], summary="need evidence"),
-        "_retrieval_scope": {"section_id": "s1", "round": 0, "revision": 0}}
-    before = deepcopy(state)
+    request = RetrievalRequest(
+        question="question",
+        gaps=("gap",),
+        scope={"section_id": "s1", "round": 0, "revision": 0},
+    )
+    before = deepcopy(request)
     async with scope_for() as (store, _, record):
         with pytest.raises(RetrievalDeferred):
-            await search_agent.search_agent_node(state)
-        assert state == before
+            await retrieval_service.retrieve_evidence(request)
+        assert request == before
         assert calls == {"question": 1, "gap": 2}
         assert store.runs[record.run_id].budget["retrieval_calls"] == 3
         saved = next(v for v in store.retrievals.values() if v["status"] == "succeeded")
@@ -61,10 +63,10 @@ async def test_mixed_batch_resume_reuses_success_and_only_retries_failed_query(m
         await store.finish_execution(record.run_id, record.execution_id, RunStatus.PAUSED, {})
     recovered = True
     async with scope_for(store) as (_, _, record):
-        result = await search_agent.search_agent_node(state)
+        result = await retrieval_service.retrieve_evidence(request)
         assert calls == {"question": 1, "gap": 3}
-        assert len(result["search_results"]) == 2
-        assert result["search_results"][0]["metadata"]["retrieved_at"] == timestamp
+        assert len(result) == 2
+        assert result[0]["metadata"]["retrieved_at"] == timestamp
         budget = store.runs[record.run_id].budget
         assert budget["retrieval_calls"] == 4
         assert sum(v["status"] == "unknown" for v in budget["reservations"].values()) == 2
@@ -242,7 +244,7 @@ async def test_sqlite_graph_restart_replays_receipt_and_preserves_completed_chap
             raise TimeoutError("controlled second query failure")
         return [evidence("渠道")]
     monkeypatch.setattr(workflow, "call_model", fake.model)
-    monkeypatch.setattr(search_agent, "_knowledge_search", search)
+    monkeypatch.setattr(retrieval_service, "_knowledge_search", search)
     monkeypatch.setattr(settings.tool_secrets, "tavily_api_key", SecretStr(""))
     store = MemoryRunStore()
     service = RunService(store)

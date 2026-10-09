@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from multi_agent_research.core import streaming
+from multi_agent_research.core.state import CURRENT_WORKFLOW_VERSION
 
 
 @pytest.mark.asyncio
@@ -19,24 +20,21 @@ async def test_stream_events_include_the_run_id(monkeypatch: pytest.MonkeyPatch)
             if self.state_reads == 1:
                 return SimpleNamespace(values={})
             return SimpleNamespace(values={
+                "workflow_version": CURRENT_WORKFLOW_VERSION,
                 "final_report": "完成",
                 "writer_status": "complete",
                 "iteration_count": 1,
-                "search_results": [],
+                "sections": [],
                 "token_budget_used": 12,
             })
 
         async def astream(self, state: dict, *, config: dict):
             self.input_state = state
             yield {
-                "supervisor": {
-                    "iteration_count": 1,
-                    "next_agent": "writer_agent",
-                    "supervisor_reason": "测试",
-                }
+                "plan_sections": {"sections": []}
             }
             yield {
-                "writer_agent": {
+                "assemble_report": {
                     "final_report": "完成",
                     "writer_status": "complete",
                 }
@@ -65,7 +63,7 @@ async def test_stream_events_include_the_run_id(monkeypatch: pytest.MonkeyPatch)
 
     assert [name for name, _ in events] == [
         "start",
-        "supervisor_decision",
+        "section_plan",
         "report_ready",
         "done",
     ]
@@ -86,11 +84,12 @@ async def test_resume_continues_with_none_input(monkeypatch: pytest.MonkeyPatch)
         async def aget_state(self, config: dict):
             self.state_reads += 1
             values = {
-                "question": "原始问题",
+                "research_question": "原始问题",
+                "workflow_version": CURRENT_WORKFLOW_VERSION,
                 "final_report": "" if self.state_reads == 1 else "恢复完成",
                 "writer_status": "not_started" if self.state_reads == 1 else "complete",
                 "iteration_count": 2,
-                "search_results": [],
+                "sections": [],
                 "token_budget_used": 20,
             }
             return SimpleNamespace(values=values)
@@ -98,7 +97,7 @@ async def test_resume_continues_with_none_input(monkeypatch: pytest.MonkeyPatch)
         async def astream(self, state: dict | None, *, config: dict):
             self.graph_input = state
             yield {
-                "writer_agent": {
+                "assemble_report": {
                     "final_report": "恢复完成",
                     "writer_status": "complete",
                 }

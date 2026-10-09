@@ -157,12 +157,13 @@ async def chapter(state):
 
 async def partial_failure(state):
     """Real successful query plus a clearly injected sibling failure, repeated twice."""
-    from multi_agent_research.agents import search_agent
+    from multi_agent_research.retrieval import service as retrieval_service
     from multi_agent_research.sections import workflow
     from multi_agent_research.knowledge.client import get_knowledge_service_client
     ready = asyncio.Event()
     counts = {"real_queries": 0, "successful_chunks": 0}
-    original_knowledge, original_web = search_agent._knowledge_search, search_agent._web_search
+    original_knowledge = retrieval_service._knowledge_search
+    original_web = retrieval_service._web_search
     target = queries_for(state)[0]
     async def knowledge(query, iteration):
         if query == target:
@@ -176,7 +177,8 @@ async def partial_failure(state):
         raise CallTimeout("INJECTED: sibling timeout after a real query completed")
     async def no_web(*args):
         return []
-    search_agent._knowledge_search, search_agent._web_search = knowledge, no_web
+    retrieval_service._knowledge_search = knowledge
+    retrieval_service._web_search = no_web
     try:
         for attempt in (1, 2):
             ready.clear()
@@ -188,7 +190,8 @@ async def partial_failure(state):
                 emit("partial_failure", attempt=attempt, error=type(exc).__name__, state_unchanged=state == before,
                      **counts)
     finally:
-        search_agent._knowledge_search, search_agent._web_search = original_knowledge, original_web
+        retrieval_service._knowledge_search = original_knowledge
+        retrieval_service._web_search = original_web
         await get_knowledge_service_client().aclose()
 
 

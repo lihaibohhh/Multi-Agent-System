@@ -36,7 +36,7 @@ Content-Type: application/json
 
 页面：打开已完成报告 → 展开章节 → 填写修订要求 → 创建修订 Run → 核对待重建章节 → 启动。
 
-普通子 Run 可在 `POST /api/runs` 中增加 `parent_section_ids: ["section_1"]`。省略表示保存所有父章节供后续规划选择，空数组表示不提供章节；不能在没有父 Run 时使用。旧 Supervisor 报告没有章节产物，仍走文本快照回退，不支持局部修订。
+普通子 Run 可在 `POST /api/runs` 中增加 `parent_section_ids: ["section_1"]`。省略表示保存所有父章节供后续规划选择，空数组表示不提供章节；不能在没有父 Run 时使用。没有章节产物的外部历史报告只能作为文本快照参考，不支持局部修订。
 
 SSE 新增 `report_review`；`section_progress` 增加 `section_claims` 阶段。Run 查询返回 `sections[*].claims`、历史草稿及 `report_review`。恢复时同步两类产物以修复 Checkpoint 与业务展示之间可能的短暂不同步。
 

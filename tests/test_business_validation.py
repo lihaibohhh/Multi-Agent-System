@@ -166,7 +166,7 @@ async def test_plan_maximum_and_parent_ids_corrected_inside_real_wrapper(monkeyp
     good = {"sections": [{"title": "甲", "question": "第一个研究问题"}]}
     async with fake_provider([json.dumps(bad), json.dumps(good)]) as (model, requests), audit() as records:
         monkeypatch.setattr(workflow, "load_chat_model", lambda _: model)
-        result = await workflow.plan_sections({"research_question": "test question", "workflow_version": 3})
+        result = await workflow.plan_sections({"research_question": "test question"})
     assert len(result["sections"]) == 1 and len(requests) == 2
     assert {i["type"] for i in records[0]["errors"]} == {"chapter_limit", "unknown_parent_section"}
 
@@ -221,7 +221,7 @@ async def test_full_graph_schema_parser_business_audit_failure_restart_and_assem
     from tests.test_claim_repair import repair_from_prompt
     repairs = []
     broken = True
-    monkeypatch.setattr(workflow, "search_agent_node", fake.search)
+    monkeypatch.setattr(workflow, "retrieve_evidence", fake.search)
     monkeypatch.setattr(workflow.settings.agent, "section_max_count", 4)
     async def handler(request):
         payload = json.loads(request.content)

@@ -9,6 +9,44 @@ from .models import SectionRecord
 
 CITATION = re.compile(r"\[来源(\d+)\]")
 
+SOURCE_LABEL: dict[str, str] = {
+    "knowledge": "内部知识库服务",
+    "web": "联网检索",
+    "cache": "语义缓存",
+}
+
+
+def extract_doc_title(result: dict) -> str:
+    """Return a human-readable source title from retrieval metadata."""
+    metadata = result.get("metadata") or {}
+    file_path = metadata.get("source", "")
+    if file_path:
+        filename = file_path.replace("\\", "/").split("/")[-1]
+        return filename.removesuffix(".pdf")[:60]
+    chunk_id = metadata.get("chunk_id", "")
+    if chunk_id:
+        raw = chunk_id.split("::")[0]
+        filename = raw.replace("\\", "/").split("/")[-1]
+        return filename.removesuffix(".pdf")[:60]
+    url = metadata.get("url", "")
+    return url[:80] if url else ""
+
+
+def format_results_for_prompt(results: list[dict], max_content: int = 600) -> str:
+    """Format retrieval artifacts for model prompts with stable citation labels."""
+    parts: list[str] = []
+    for index, result in enumerate(results, 1):
+        source = result["source"]
+        source_label = SOURCE_LABEL.get(source, source)
+        doc_title = extract_doc_title(result)
+        title_part = f" · {doc_title}" if doc_title else ""
+        parts.append(
+            f"[来源{index}] {source_label}{title_part} | 相关性 {result['score']:.2f}\n"
+            f"检索词：{result['query']}\n"
+            f"内容：{result['content'][:max_content]}"
+        )
+    return "\n\n".join(parts)
+
 
 def evidence_key(result: dict) -> str:
     meta = result.get("metadata") or {}

@@ -316,19 +316,6 @@ async def test_failed_claim_binding_resumes_without_rewriting_draft(monkeypatch,
 
 
 @pytest.mark.asyncio
-async def test_v2_checkpoint_still_skips_new_claims_and_report_nodes(monkeypatch):
-    fake = FakeModels()
-    install(monkeypatch, fake)
-    state = initial_state("分析公司X竞争优势")
-    state["workflow_version"] = 2
-    result = await build_graph().ainvoke(state, streaming.research_config("v2", state))
-    assert result["writer_status"] == "complete"
-    assert result["model_calls"] == 10
-    assert fake.calls["report_review"] == 0
-    assert fake.calls["claims:成本"] == 0
-
-
-@pytest.mark.asyncio
 async def test_revision_api_validates_target_and_preserves_create_start_split(monkeypatch):
     _, _, store, service, _ = await completed_parent(monkeypatch)
     monkeypatch.setattr(server, "run_service", service)

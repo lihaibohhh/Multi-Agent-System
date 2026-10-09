@@ -1,5 +1,7 @@
 # vLLM 学习与实践总结
 
+> 历史实验归档：文中旧 `analyst_agent` 生产链路已经删除，内容仅保留实验结论，不再是可执行说明。
+
 > 涉及环境：WSL2(Ubuntu) + RTX 3060(12GB) + vLLM，测试模型 Qwen2.5-1.5B-Instruct / Qwen2.5-7B-Instruct-GPTQ-Int4
 
 ---

@@ -15,7 +15,7 @@
         <div class="brand-mark">🔬</div>
         <div>
           <h1>Multi-Agent Research System</h1>
-          <p class="subtitle">LangGraph · Supervisor · Search · Analyst · Writer</p>
+          <p class="subtitle">LangGraph · 6 role Agents · deterministic retrieval</p>
         </div>
       </div>
       <div class="health" id="health">
@@ -90,23 +90,32 @@
             <span class="hint" id="event-cursor">event #0</span>
           </div>
           <div class="pipeline">
-            <article class="agent" id="agent-supervisor">
-              <div class="agent-name">🎯 Supervisor</div>
-              <div class="agent-detail" id="meta-supervisor">任务分解与路由决策</div>
+            <article class="agent" id="agent-planner">
+              <div class="agent-name">🧭 Planner</div>
+              <div class="agent-detail" id="meta-planner">章节规划</div>
             </article>
-            <article class="agent" id="agent-search">
-              <div class="agent-name">🔍 Search</div>
-              <div class="agent-detail" id="meta-search">knowledge-service · Tavily</div>
+            <article class="agent" id="agent-evidence-analyst">
+              <div class="agent-name">🔬 Evidence Analyst</div>
+              <div class="agent-detail" id="meta-evidence-analyst">证据充分性分析</div>
             </article>
-            <article class="agent" id="agent-analyst">
-              <div class="agent-name">🔬 Analyst</div>
-              <div class="agent-detail" id="meta-analyst">证据完整性审查</div>
+            <article class="agent" id="agent-section-writer">
+              <div class="agent-name">✍️ Section Writer</div>
+              <div class="agent-detail" id="meta-section-writer">章节写作</div>
             </article>
-            <article class="agent" id="agent-writer">
-              <div class="agent-name">✍️ Writer</div>
-              <div class="agent-detail" id="meta-writer">结构化报告生成</div>
+            <article class="agent" id="agent-section-reviewer">
+              <div class="agent-name">✅ Section Reviewer</div>
+              <div class="agent-detail" id="meta-section-reviewer">章节语义审校</div>
+            </article>
+            <article class="agent" id="agent-claim-extractor">
+              <div class="agent-name">🔗 Claim Extractor</div>
+              <div class="agent-detail" id="meta-claim-extractor">结论—证据关联</div>
+            </article>
+            <article class="agent" id="agent-report-reviewer">
+              <div class="agent-name">📋 Report Reviewer</div>
+              <div class="agent-detail" id="meta-report-reviewer">全篇一致性审校</div>
             </article>
           </div>
+          <p class="hint">非 Agent：Retrieval Service 负责 knowledge-service/Tavily 只读检索、重试、去重和标准化。</p>
           <div class="event-log" id="event-log" aria-live="polite"></div>
         </div></section>
       </aside>

@@ -3,7 +3,7 @@
 const $ = (id) => document.getElementById(id);
 const TERMINAL = new Set(["completed", "failed", "interrupted", "cancelled", "paused", "budget_limited"]);
 const RESUMABLE = new Set(["failed", "interrupted", "paused", "budget_limited"]);
-const AGENTS = ["supervisor", "search", "analyst", "writer"];
+const AGENTS = ["planner", "evidence-analyst", "section-writer", "section-reviewer", "claim-extractor", "report-reviewer"];
 
 const state = {
   source: null,
@@ -71,10 +71,12 @@ function resetPipeline() {
   renderSections([]);
   renderReportReview(null);
   for (const name of AGENTS) $("agent-" + name).className = "agent";
-  $("meta-supervisor").textContent = "任务分解与路由决策";
-  $("meta-search").textContent = "knowledge-service · Tavily";
-  $("meta-analyst").textContent = "证据完整性审查";
-  $("meta-writer").textContent = "结构化报告生成";
+  $("meta-planner").textContent = "章节规划";
+  $("meta-evidence-analyst").textContent = "证据充分性分析";
+  $("meta-section-writer").textContent = "章节写作";
+  $("meta-section-reviewer").textContent = "章节语义审校";
+  $("meta-claim-extractor").textContent = "结论—证据关联";
+  $("meta-report-reviewer").textContent = "全篇一致性审校";
   $("event-log").replaceChildren();
   $("event-cursor").textContent = "event #0";
 }
@@ -477,9 +479,6 @@ function eventMessage(type, data) {
     case "run_resumed": return "已从原 Checkpoint 恢复";
     case "start": return data.reinitialized ? "启动前中断且无执行产物，重新初始化研究"
       : data.resumed ? "LangGraph 恢复执行" : "LangGraph 开始执行";
-    case "supervisor_decision": return `第 ${data.iteration} 轮 → ${data.next || "结束"}`;
-    case "search_complete": return `新增 ${data.new_count} 条，累计 ${data.total_count} 条`;
-    case "analyst_verdict": return `${data.verdict} · 置信度 ${Math.round((data.confidence || 0) * 100)}%`;
     case "report_ready": return `报告生成完成，共 ${data.char_count || 0} 字`;
     case "done": return "研究任务已完成";
     case "run_interrupted": return `任务中断：${data.reason || "未知原因"}`;
@@ -529,28 +528,20 @@ function handleRunEvent(type, event) {
     if (state.currentRun) state.currentRun.report_review = data.report_review;
   }
   if (type.startsWith("section_")) {
-    const target = { plan_sections: "supervisor", section_search: "search", section_analyze: "analyst", section_write: "writer", section_review: "analyst", section_claims: "analyst" }[data.stage];
-    if (target && target !== "supervisor") setAgent("supervisor", "done", "章节协调中");
+    const target = { plan_sections: "planner", section_analyze: "evidence-analyst", section_write: "section-writer", section_review: "section-reviewer", section_claims: "claim-extractor" }[data.stage];
     if (target) setAgent(target, "done", eventMessage(type, data));
   }
+  if (type === "report_review") setAgent("report-reviewer", "done", "全篇一致性审校完成");
 
   if (type === "run_started" || type === "run_resumed" || type === "start") {
     setRunStatus("running");
-    setAgent("supervisor", "active", type === "run_resumed" ? "读取原 Run Checkpoint" : "等待首次路由决策");
-  } else if (type === "supervisor_decision") {
-    setAgent("supervisor", "done", `第 ${data.iteration} 轮 → ${data.next || "结束"}`);
-    const target = { search_agent: "search", analyst_agent: "analyst", writer_agent: "writer" }[data.next];
-    if (target) setAgent(target, "active", data.reason || "正在执行");
-  } else if (type === "search_complete") {
-    setAgent("search", "done", `+${data.new_count} new · ${data.total_count} total`);
-  } else if (type === "analyst_verdict") {
-    setAgent("analyst", "done", `${data.verdict} · ${Math.round((data.confidence || 0) * 100)}% · ${data.gaps?.length || 0} gaps`);
+    setAgent("planner", "active", type === "run_resumed" ? "读取当前工作流 Checkpoint" : "准备章节规划");
   } else if (type === "report_ready") {
-    setAgent("writer", "done", `${data.char_count || 0} 字 · ${data.writer_status || "完成"}`);
+    setAgent("report-reviewer", "done", `审校完成 · 报告 ${data.char_count || 0} 字`);
   } else if (type === "done") {
     state.receivedTerminal = true;
     setRunStatus("completed");
-    setAgent("writer", "done", `${data.char_count || 0} 字 · 完成`);
+    setAgent("report-reviewer", "done", `${data.char_count || 0} 字 · 完成`);
     renderReport(data.report || state.reportText, data);
     if (state.currentRun) {
       state.currentRun.status = "completed";
@@ -574,9 +565,8 @@ function handleRunEvent(type, event) {
     state.receivedTerminal = true;
     const status = ({error: "failed", run_interrupted: "interrupted", run_paused: "paused", budget_limited: "budget_limited"})[type];
     setRunStatus(status);
-    const failedAgent = ({section_claims:"analyst", section_review:"analyst", section_analyze:"analyst", section_search:"search", section_write:"writer"})[data.stage];
+    const failedAgent = ({section_claims:"claim-extractor", section_review:"section-reviewer", section_analyze:"evidence-analyst", section_write:"section-writer", report_review:"report-reviewer", plan_sections:"planner"})[data.stage];
     if (failedAgent) {
-      setAgent("supervisor", "done", "已保存进度");
       setAgent(failedAgent, "error", data.reason === "claims_pending" ? `${data.section_id}：结论关联待修复，展开章节查看详情` : `${data.section_id || ""}：步骤停止，见错误详情`);
     } else {
       for (const name of AGENTS) {
@@ -603,8 +593,7 @@ function subscribeRun(run, cursor) {
   const source = new EventSource(`/api/runs/${encodeURIComponent(run.run_id)}/stream?after=${cursor}`);
   state.source = source;
   const eventTypes = [
-    "run_created", "run_started", "run_resumed", "start", "supervisor_decision",
-    "search_complete", "analyst_verdict", "report_ready", "done", "run_interrupted", "error",
+    "run_created", "run_started", "run_resumed", "start", "report_ready", "done", "run_interrupted", "error",
     "section_plan", "section_progress", "section_snapshot", "report_review",
     "pause_requested", "run_paused", "budget_limited", "budget_migrated", "budget_increased", "retrieval_progress",
   ];

@@ -4,7 +4,7 @@
 
 恢复仍从 LangGraph 失败节点开始，但检索节点内部按稳定查询标识重放持久化成果，只向外部发送未成功且有剩余尝试额度的请求。Token 和模型预算沿用第一阶段的共享研究账户，不会因这一改动清零。
 
-实现位置：`core/retrieval.py` 是操作状态/有限重试；`runs/repository.py` 是事务与执行隔离；`agents/search_agent.py` 给查询绑定参数；`sections/workflow.py` 加章节/版本/轮次边界；`sections/artifacts.py` 保留原检索时间。
+实现位置：`core/retrieval.py` 是操作状态/有限重试；`runs/repository.py` 是事务与执行隔离；`retrieval/service.py` 给查询绑定参数；`retrieval/normalization.py` 负责标准化与轮内去重；`sections/workflow.py` 加章节/版本/轮次边界；`sections/artifacts.py` 保留原检索时间。
 
 暂时依赖故障使用已有 `paused` 状态及 `dependency_unavailable` 原因，不新增第二套暂停 API。失败重试不会重新开一份预算。限额目前固定保存在每个操作的策略中：每执行 2 次、累计 4 次，无自动追加接口。
 

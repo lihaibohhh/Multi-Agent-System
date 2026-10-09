@@ -238,7 +238,7 @@ async def test_retained_tool_interface_cannot_swallow_budget_stop(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_web_network_retries_each_need_quota_and_no_signature_fallback(monkeypatch):
-    from multi_agent_research.agents import search_agent
+    from multi_agent_research.retrieval import service as retrieval_service
     requests = []
     class Tool:
         def __init__(self, **kwargs):
@@ -249,10 +249,10 @@ async def test_web_network_retries_each_need_quota_and_no_signature_fallback(mon
     monkeypatch.setitem(sys.modules, "langchain_tavily", SimpleNamespace(TavilySearch=Tool))
     monkeypatch.setattr(settings.tool_secrets, "tavily_api_key", SecretStr("test-only"))
     monkeypatch.setattr(settings.agent, "run_max_retrieval_calls", 2)
-    monkeypatch.setattr(search_agent, "_WEB_RETRY_DELAY", 0)
+    monkeypatch.setattr(retrieval_service, "_WEB_RETRY_DELAY", 0)
     async with scope_for() as (store, _, record):
         with pytest.raises(BudgetExceeded):
-            await search_agent._web_search("test", 0)
+            await retrieval_service._web_search("test", 0)
         assert requests == [{"query": "test"}, {"query": "test"}]
         assert store.runs[record.run_id].budget["retrieval_calls"] == 2
 
@@ -261,16 +261,17 @@ async def test_web_network_retries_each_need_quota_and_no_signature_fallback(mon
 async def test_knowledge_transport_timeout_is_not_swallowed(monkeypatch):
     from multi_agent_research.core.retrieval import RetrievalDeferred
     from httpx import ReadTimeout
-    from multi_agent_research.agents import search_agent
+    from multi_agent_research.retrieval import RetrievalRequest
+    from multi_agent_research.retrieval import service as retrieval_service
     from multi_agent_research.knowledge.client import KnowledgeServiceUnavailable
     class Client:
         async def search(self, *args, **kwargs):
             raise KnowledgeServiceUnavailable("timeout") from ReadTimeout("test")
-    monkeypatch.setattr(search_agent, "get_knowledge_service_client", Client)
+    monkeypatch.setattr(retrieval_service, "get_knowledge_service_client", Client)
     monkeypatch.setattr(settings.tool_secrets, "tavily_api_key", SecretStr(""))
     async with scope_for() as (store, _, record):
         with pytest.raises(RetrievalDeferred):
-            await search_agent.search_agent_node({"research_question": "test"})
+            await retrieval_service.retrieve_evidence(RetrievalRequest(question="test"))
         assert store.runs[record.run_id].budget["retrieval_calls"] == 2
 
 
@@ -309,7 +310,7 @@ async def test_budget_stop_checkpoint_restart_keeps_first_chapter(monkeypatch, t
                             usage_metadata={"input_tokens": 5, "output_tokens": 5, "total_tokens": 10})
             return {"raw": raw, "parsed": output, "parsing_error": None} if self.schema else raw
     monkeypatch.setattr(workflow, "load_chat_model", lambda _: Model())
-    monkeypatch.setattr(workflow, "search_agent_node", fake.search)
+    monkeypatch.setattr(workflow, "retrieve_evidence", fake.search)
     monkeypatch.setattr(settings.agent, "run_max_model_calls", 6)
     store = MemoryRunStore()
     service = RunService(store)

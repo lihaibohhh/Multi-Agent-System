@@ -14,7 +14,7 @@ from uuid import uuid4
 from psycopg import AsyncConnection, sql
 from psycopg.rows import dict_row
 
-from multi_agent_research.agents.search_agent import _knowledge_search
+from multi_agent_research.retrieval.service import _knowledge_search
 from multi_agent_research.core.budget import RunBudget, current_budget
 from multi_agent_research.core.config import settings
 from multi_agent_research.core.retrieval import RetrievalDeferred, durable_retrieval, gather_retrievals

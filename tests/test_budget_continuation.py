@@ -180,7 +180,7 @@ async def test_real_graph_pause_checkpoint_reopen_keeps_completed_chapter(monkey
                             usage_metadata={"input_tokens": 5, "output_tokens": 5, "total_tokens": 10})
             return {"raw": raw, "parsed": output, "parsing_error": None} if self.schema else raw
     monkeypatch.setattr(workflow, "load_chat_model", lambda _: Model())
-    monkeypatch.setattr(workflow, "search_agent_node", fake.search)
+    monkeypatch.setattr(workflow, "retrieve_evidence", fake.search)
     store = MemoryRunStore()
     service = RunService(store)
     original_publish = store.publish_execution_event

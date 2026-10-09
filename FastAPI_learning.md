@@ -1,5 +1,7 @@
 # FastAPI 完全解析：从基础到这段代码
 
+> 历史学习笔记：其中 Supervisor/Search/Analyst/Writer 四节点链路已经从当前项目删除，请以 README 和现行代码为准。
+
 ---
 
 ## 一、FastAPI 是什么，为什么用它？
