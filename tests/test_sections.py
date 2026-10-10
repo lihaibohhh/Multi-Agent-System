@@ -8,9 +8,11 @@ from multi_agent_research.core.graph import build_graph
 from multi_agent_research.core.state import initial_state
 from multi_agent_research.agents import AgentTurnLimitError
 from multi_agent_research.sections import workflow
+from multi_agent_research.sections.claim_candidates import ClaimCandidateBatch
 from multi_agent_research.sections.models import (
-    ChiefEditorResult,
-    ClaimExtraction,
+    EditedSectionArtifact,
+    EditorialBlueprint,
+    EditorialFraming,
     ReportReview,
     SectionPlan,
     SectionRecord,
@@ -44,42 +46,65 @@ class FakeModels:
 
     async def raw_model(self, system, prompt, schema=None):
         cost = {"tokens": 10, "unknown": 0}
-        if schema is ChiefEditorResult:
-            self.calls["chief_edit"] += 1
+        if schema in {EditorialBlueprint, EditedSectionArtifact, EditorialFraming}:
             payload = __import__("json").loads(prompt)
-            chapters = payload["chapters"]
-            review = payload["report_review"]
-            claims = [
-                claim["claim_id"]
-                for chapter in chapters
-                for claim in chapter["claims"]
-            ]
-            return ChiefEditorResult(
-                verdict="ready" if review["verdict"] == "pass" else "limited",
-                report_title="研究报告：分析公司X竞争优势",
-                executive_summary="以下报告综合分析公司X的竞争优势。",
-                sections=[
-                    {
-                        "title": chapter["title"],
-                        "body": chapter["draft"],
-                        "source_section_ids": [chapter["section_id"]],
-                        "claim_ids": [claim["claim_id"] for claim in chapter["claims"]],
-                    }
-                    for chapter in chapters
-                ],
-                conclusion="现有证据构成了对研究问题的分层回答。",
-                issue_resolutions=[
-                    {
-                        "issue_index": index,
-                        "action": "preserved_as_limitation",
-                        "explanation": issue["detail"],
-                        "section_ids": issue["section_ids"],
-                    }
-                    for index, issue in enumerate(review["issues"])
-                ],
-                used_claim_ids=claims,
-                unresolved_issues=[issue["detail"] for issue in review["issues"]],
-            ), cost
+            phase = payload["phase"]
+            self.calls[f"chief_edit:{phase}"] += 1
+            if phase == "plan":
+                chapters = payload["chapters"]
+                review = payload["report_review"]
+                limited = review["verdict"] != "pass" or any(
+                    chapter["limitations"] for chapter in chapters
+                )
+                return EditorialBlueprint(**{
+                        "verdict": "limited" if limited else "ready",
+                        "report_title": "研究报告：分析公司X竞争优势",
+                        "thesis": "成本与渠道共同决定竞争优势的持续性。",
+                        "audience": "需要决策依据的外部读者",
+                        "style_rules": ["先事实后判断", "统一使用公司X"],
+                        "section_plans": [
+                            {
+                                "source_section_id": chapter["section_id"],
+                                "title": chapter["title"],
+                                "purpose": chapter["question"],
+                                "claim_ids": [c["claim_id"] for c in chapter["claims"]],
+                                "evidence_ids": list(dict.fromkeys(
+                                    evidence_id
+                                    for claim in chapter["claims"]
+                                    for evidence_id in claim["evidence_ids"]
+                                )),
+                                "transition_out": "由本章发现进入下一层分析。",
+                            }
+                            for chapter in chapters
+                        ],
+                        "issue_resolutions": [
+                            {
+                                "issue_index": index,
+                                "action": "preserved_as_limitation",
+                                "explanation": issue["detail"],
+                                "section_ids": issue["section_ids"],
+                            }
+                            for index, issue in enumerate(review["issues"])
+                        ],
+                        "unresolved_issues": [issue["detail"] for issue in review["issues"]],
+                }), cost
+            if phase == "section":
+                chapter = payload["target_chapter"]
+                plan = payload["editorial_brief"]["target_plan"]
+                return EditedSectionArtifact(**{
+                        "section": {
+                            "title": plan["title"],
+                            "body": chapter["draft"],
+                            "source_section_ids": [chapter["section_id"]],
+                            "claim_ids": plan["claim_ids"],
+                        },
+                        "summary": f"{plan['title']}章节完成既定分析。",
+                        "handoff": plan["transition_out"],
+                }), cost
+            return EditorialFraming(**{
+                    "executive_summary": "以下报告综合分析公司X的竞争优势。",
+                    "conclusion": "现有证据构成了对研究问题的分层回答。",
+            }), cost
         if schema is ReportReview:
             self.calls["report_review"] += 1
             return ReportReview(verdict="pass", summary="全篇口径一致"), cost
@@ -92,19 +117,28 @@ class FakeModels:
                     {"title": "结论", "question": "公司X的整体优势是否持续", "kind": "synthesis"},
                 ]
             ), cost
-        chapter = next(name for name in ("成本", "渠道", "结论") if f"本章：{name}\n" in prompt)
-        if schema is ClaimExtraction:
+        chapter_prompt = prompt
+        if schema is ClaimCandidateBatch:
+            chapter_prompt = __import__("json").loads(prompt)["section_context"]
+        chapter = next(
+            name
+            for name in ("成本", "渠道", "结论")
+            if f"本章：{name}\n" in chapter_prompt
+        )
+        if schema is ClaimCandidateBatch:
             self.calls[f"claims:{chapter}"] += 1
-            return ClaimExtraction(
+            payload = __import__("json").loads(prompt)
+            draft_id = next(key for key in payload["segments"] if key.startswith("D"))
+            evidence_id = next(key for key in payload["segments"] if key.startswith("E"))
+            return ClaimCandidateBatch(
                 claims=[
                     {
                         "statement": f"{chapter}的分析结论",
-                        "draft_quote": f"{chapter}的分析结论",
+                        "draft_segment_id": draft_id,
                         "assessment": "supported",
                         "evidence": [
                             {
-                                "source_number": 1,
-                                "quote": "的实际证据摘录",
+                                "segment_id": evidence_id,
                                 "relation": "supports",
                             }
                         ],
@@ -155,8 +189,8 @@ async def test_serial_chapters_scoped_search_and_dependent_synthesis(monkeypatch
     assert all(s["revision"] == 1 for s in result["sections"])
     assert "成本的分析结论[来源1]" in result["final_report"]
     assert "渠道的分析结论[来源2]" in result["final_report"]
-    assert result["model_calls"] == 16  # chapter pipeline + pre-review + edit + post-review
-    assert result["token_budget_used"] == 160
+    assert result["model_calls"] == 20  # chapter pipeline + review + plan/3 chapters/framing + review
+    assert result["token_budget_used"] == 200
 
 
 @pytest.mark.asyncio

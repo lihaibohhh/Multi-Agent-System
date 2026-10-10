@@ -2,19 +2,22 @@ import json
 from copy import deepcopy
 
 import pytest
+from pydantic import ValidationError
 
 from multi_agent_research.sections import claim_repair as repair
+from multi_agent_research.sections.claim_candidates import ClaimRepairCandidate
 from multi_agent_research.sections.models import SectionRecord
+from multi_agent_research.sections.segments import build_segment_catalog
 
 
 def repair_from_prompt(prompt, invalid=False):
     view = json.loads(prompt)
-    draft = next(k for k in view['excerpts'] if k.startswith('D:'))
-    source = next(k for k in view['excerpts'] if k.startswith('S'))
+    draft = next(k for k in view['segments'] if k.startswith('D'))
+    source = next(k for k in view['segments'] if k.startswith('E'))
     return repair.ClaimRepairs(repairs=[{
-        'slot': item['slot'], 'statement': item['candidate']['statement'],
-        'draft_span_id': 'missing' if invalid else draft, 'assessment': 'supported',
-        'evidence': [{'source_span_id': source, 'relation': 'supports'}],
+        'slot': item['slot'],
+        'draft_segment_id': 'missing' if invalid else draft, 'assessment': 'supported',
+        'evidence': [{'segment_id': source, 'relation': 'supports'}],
     } for item in view['pending']])
 
 
@@ -35,7 +38,7 @@ def test_partial_acceptance_source_confusion_and_local_id_repair():
     work = repair.split_extraction(section, [good] * 7 + [bad])
     original = deepcopy(work['accepted'])
     assert len(original) == 7 and work['pending'][0]['slot'] == 8
-    assert any(e['type'] == 'source_used_as_draft' for e in work['pending'][0]['errors'])
+    assert 'claim_id' not in work['pending'][0]['candidate']
     prompt = repair.repair_prompt(section, work)
     assert '不能被重写的通过项' not in prompt
     fixed = repair.apply_repairs(section, work, repair_from_prompt(prompt))
@@ -46,7 +49,7 @@ def test_partial_acceptance_source_confusion_and_local_id_repair():
     assert work['pending']  # Pure validator does not mutate its input.
 
 
-@pytest.mark.parametrize('kind', ['wrong_kind', 'unknown', 'duplicate', 'changed_statement', 'dropped_counter'])
+@pytest.mark.parametrize('kind', ['wrong_kind', 'unknown', 'duplicate', 'dropped_counter'])
 def test_invalid_patches_keep_original_pending(kind):
     section, bad, good = example()
     if kind == 'dropped_counter':
@@ -55,16 +58,25 @@ def test_invalid_patches_keep_original_pending(kind):
     patches = repair_from_prompt(repair.repair_prompt(section, work))
     patch = patches.repairs[0]
     if kind == 'wrong_kind':
-        patch.draft_span_id = patch.evidence[0].source_span_id
+        patch.draft_segment_id = patch.evidence[0].segment_id
     elif kind == 'unknown':
         patch.slot = 1  # Cannot overwrite an accepted slot.
     elif kind == 'duplicate':
         patches.repairs.append(patch.model_copy(deep=True))
-    elif kind == 'changed_statement':
-        patch.statement = '偷偷替换结论'
     updated = repair.apply_repairs(section, work, patches)
     assert updated['accepted'] == work['accepted']
-    assert updated['pending'][0]['candidate'] == bad
+    assert updated['pending'][0]['candidate']['statement'] == bad['statement']
+
+
+def test_repair_schema_forbids_program_owned_or_statement_fields():
+    with pytest.raises(ValidationError, match='extra_forbidden'):
+        ClaimRepairCandidate.model_validate({
+            'slot': 1,
+            'statement': '不得由修复模型改写',
+            'draft_segment_id': 'D0001',
+            'assessment': 'unsupported',
+            'evidence': [],
+        })
 
 
 def test_malformed_siblings_are_salvaged_individually():
@@ -103,11 +115,25 @@ async def test_real_parser_failure_keeps_good_siblings_and_charges_one_call(monk
     from multi_agent_research.sections import workflow
     from multi_agent_research.core.state import initial_state
     from tests.test_model_output import fake_provider, audit
-    section, bad, good = example()
-    bad['assessment'] = 'invalid'
+    section, _, good = example()
+    catalog = build_segment_catalog(section)
+    draft = next(
+        key for key, segment in catalog.segments.items()
+        if segment.kind == 'draft' and '其他已经通过的结论' in segment.text
+    )
+    evidence = next(
+        key for key, segment in catalog.segments.items() if segment.kind == 'evidence'
+    )
+    valid = {
+        'statement': good['statement'],
+        'draft_segment_id': draft,
+        'assessment': 'supported',
+        'evidence': [{'segment_id': evidence, 'relation': 'supports'}],
+    }
+    bad_candidate = dict(valid, assessment='invalid')
     state = initial_state('行业趋势如何？')
     state.update(sections=[section.model_dump()], active_section=0)
-    async with fake_provider([json.dumps({'claims': [good, bad]})]) as (model, requests), audit() as records:
+    async with fake_provider([json.dumps({'claims': [valid, bad_candidate]})]) as (model, requests), audit() as records:
         monkeypatch.setattr(workflow, 'load_chat_model', lambda _: model)
         output = await workflow.extract_claims(state)
     saved = output['sections'][0]

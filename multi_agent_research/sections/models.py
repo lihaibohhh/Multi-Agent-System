@@ -64,7 +64,16 @@ class ClaimExtraction(BaseModel):
 
 
 class ConsistencyIssue(BaseModel):
-    kind: Literal["conflict", "scope", "duplication", "coverage", "dependency"]
+    kind: Literal[
+        "conflict",
+        "scope",
+        "duplication",
+        "coverage",
+        "dependency",
+        "structure",
+        "readability",
+        "provenance",
+    ]
     section_ids: list[str] = Field(default_factory=list, max_length=4)
     detail: str = Field(min_length=1, max_length=1500)
 
@@ -88,9 +97,90 @@ class EditedReportSection(BaseModel):
     """One reader-facing section with stable evidence tokens and provenance."""
 
     title: str = Field(min_length=1, max_length=120)
-    body: str = Field(min_length=1, max_length=8000)
+    # This is a transport/candidate safety ceiling, not the publication target.
+    # The coordinator applies the chapter-specific visible-length budget after
+    # parsing so an overlong but otherwise valid candidate can be compressed.
+    body: str = Field(min_length=1, max_length=12000)
     source_section_ids: list[str] = Field(min_length=1, max_length=4)
     claim_ids: list[str] = Field(default_factory=list, max_length=48)
+
+
+class EditorialTerm(BaseModel):
+    """One canonical term the whole report must use consistently."""
+
+    term: str = Field(min_length=1, max_length=80)
+    meaning: str = Field(min_length=1, max_length=300)
+
+
+class EditorialSectionPlan(BaseModel):
+    """Shared editorial contract for one source chapter."""
+
+    source_section_id: str = Field(min_length=1, max_length=120)
+    title: str = Field(min_length=1, max_length=120)
+    purpose: str = Field(min_length=1, max_length=400)
+    claim_ids: list[str] = Field(default_factory=list, max_length=24)
+    evidence_ids: list[str] = Field(default_factory=list, max_length=24)
+    transition_in: str = Field(default="", max_length=300)
+    transition_out: str = Field(default="", max_length=300)
+    target_chars: int = Field(default=2000, ge=400, le=3000)
+
+
+class EditorialBlueprint(BaseModel):
+    """Whole-report plan shared by every bounded ChiefEditor call."""
+
+    verdict: Literal["ready", "limited"]
+    report_title: str = Field(min_length=1, max_length=180)
+    thesis: str = Field(min_length=1, max_length=1000)
+    audience: str = Field(min_length=1, max_length=300)
+    style_rules: list[str] = Field(min_length=1, max_length=8)
+    terminology: list[EditorialTerm] = Field(default_factory=list, max_length=12)
+    section_plans: list[EditorialSectionPlan] = Field(min_length=1, max_length=4)
+    issue_resolutions: list[EditorialIssueResolution] = Field(
+        default_factory=list,
+        max_length=12,
+    )
+    unresolved_issues: list[str] = Field(default_factory=list, max_length=12)
+
+
+class EditedSectionArtifact(BaseModel):
+    """One evidence-safe chapter candidate; publication length is state-dependent."""
+
+    section: EditedReportSection
+    summary: str = Field(min_length=1, max_length=600)
+    handoff: str = Field(default="", max_length=400)
+
+
+class EditorialFraming(BaseModel):
+    """Front/back matter generated only after all edited chapters exist."""
+
+    executive_summary: str = Field(min_length=1, max_length=1300)
+    conclusion: str = Field(min_length=1, max_length=1300)
+
+
+class ChiefEditorStepResult(BaseModel):
+    """Phase-tagged output contract for the single ChiefEditorAgent."""
+
+    phase: Literal["plan", "section", "compress", "framing"]
+    blueprint: EditorialBlueprint | None = None
+    section_artifact: EditedSectionArtifact | None = None
+    framing: EditorialFraming | None = None
+
+    @model_validator(mode="after")
+    def validate_phase_payload(self):
+        expected = {
+            "plan": self.blueprint,
+            "section": self.section_artifact,
+            "compress": self.section_artifact,
+            "framing": self.framing,
+        }
+        populated = sum(value is not None for value in (
+            self.blueprint,
+            self.section_artifact,
+            self.framing,
+        ))
+        if populated != 1 or expected[self.phase] is None:
+            raise ValueError("phase 必须且只能携带对应的主编阶段产物")
+        return self
 
 
 class ChiefEditorResult(BaseModel):

@@ -47,8 +47,11 @@ Invoke-RestMethod http://127.0.0.1:8000/api/health
   ReportReviewer、ChiefEditor；Claim 绑定体现为 Processor，不出现旧 Supervisor、
   SearchAgent、EvidenceAnalyst 或 ClaimExtractor 链路。
 - 每一章按“研究、写作、审校、Claim 绑定”推进，完成后再进入下一章。
-- 全章初审后进入 ChiefEditor 跨章编辑，再由 ReportReviewer 做编辑后复审；最终报告
-  能装配完成，章节引用编号有效，来源卡片和限制项可见。
+- 全章初审后，ChiefEditor 依次显示/执行全篇蓝图、逐章编辑、摘要与结论；每完成一章
+  都能形成可恢复进度，不能再出现单次整篇输出达到长度上限。若某章偏长，应先保存候选稿再显示
+  `chief_compress_section`；连续压缩无效或校验失败时应停止追加调用、使用审校稿继续，并把限制写入报告。之后由 ReportReviewer
+  按外部发布标准独立复审；最终报告结构自然、无明显拼接感，章节引用编号有效，来源卡片
+  和限制项可见。
 - Agent Trace 只显示安全元数据，不泄露 Prompt、检索正文或本地 Checkpoint 内容。
 
 ## 4. 暂停与恢复
@@ -59,6 +62,7 @@ Invoke-RestMethod http://127.0.0.1:8000/api/health
 2. 刷新页面，确认章节成果和进度仍在。
 3. 点击继续，确认从持久化边界恢复，而不是新建另一条旧版工作流。
 4. 完成后确认没有重复章节、重复来源或用量倒退。
+5. 可在任一 `chief_edit_section` 完成后暂停并恢复，确认已编辑章节不被重新调用。
 
 ## 5. 验收记录
 

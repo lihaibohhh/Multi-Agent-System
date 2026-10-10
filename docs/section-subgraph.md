@@ -12,7 +12,10 @@ section_cycle（一次只处理当前章节）
       ├─ 下一章 ────────────────┐
       │                         │
       ├─ report_review          │
-      │    -> chief_edit        │
+      │    -> chief_edit（全篇编辑蓝图）
+      │    -> chief_edit_section × N
+      │         -> chief_compress_section（仅超出动态篇幅时，最多 2 次）
+      │    -> chief_write_framing
       │    -> edited_report_review
       └─ assemble_report        │
                                 │
@@ -57,4 +60,6 @@ EvidenceResearchAgent 首轮只分析持久化证据；仍有缺口且预算允�
 - 子图结束后父图才进入下一章、全篇审校或局部操作装配。
 
 章节子图曾令版本从 v4 升级到 v5；主编编辑与编辑后复审节点令当前版本升级到 v6。
-v5 及更早的在途任务会被明确拒绝恢复，不会被当作 v6 静默重跑。
+分阶段主编改造保留 `chief_edit` 作为原入口，并在它之后增加逐章、可选压缩与 framing 节点；
+旧 v6 Run 可从待执行的 `chief_edit` 进入新流程，因此本次保持 v6。v5 及更早的在途任务
+仍会被明确拒绝恢复，不会被当作 v6 静默重跑。

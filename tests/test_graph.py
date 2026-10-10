@@ -15,6 +15,9 @@ def test_parent_graph_contains_one_chapter_subgraph_boundary() -> None:
         "section_cycle",
         "report_review",
         "chief_edit",
+        "chief_edit_section",
+        "chief_compress_section",
+        "chief_write_framing",
         "edited_report_review",
         "assemble_report",
     }
@@ -30,6 +33,9 @@ def test_section_subgraph_owns_only_chapter_execution_nodes() -> None:
         "plan_sections",
         "report_review",
         "chief_edit",
+        "chief_edit_section",
+        "chief_compress_section",
+        "chief_write_framing",
         "edited_report_review",
         "assemble_report",
     }.isdisjoint(graph.nodes)
@@ -43,6 +49,12 @@ def test_initial_state_contains_only_current_workflow_fields() -> None:
     assert state["iteration_count"] == 0
     assert state["writer_status"] == "not_started"
     assert state["edited_report"] is None
+    assert state["editorial_blueprint"] is None
+    assert state["editorial_sections"] == []
+    assert state["editorial_active_index"] == 0
+    assert state["editorial_candidate"] is None
+    assert state["editorial_compression"] == {}
+    assert state["editorial_warnings"] == []
     assert state["editorial_attempts"] == 0
     legacy = {
         "task_plan",

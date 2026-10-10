@@ -13,6 +13,10 @@ from multi_agent_research.runs.models import RunStatus
 from multi_agent_research.runs.repository import RunConflictError
 from multi_agent_research.runs.service import RunService
 from multi_agent_research.sections import workflow
+from multi_agent_research.sections.claim_candidates import (
+    ClaimCandidateBatch,
+    ClaimRepairBatch,
+)
 from multi_agent_research.sections.artifacts import (
     bind_claims, dependency_issues, parent_handoff, revision_sections,
 )
@@ -279,22 +283,26 @@ async def test_fresh_retrieval_replaces_identical_inherited_provenance(monkeypat
 
 
 @pytest.mark.asyncio
-async def test_failed_claim_binding_resumes_without_rewriting_draft(monkeypatch, tmp_path):
+async def test_failed_claim_binding_resume_cannot_reset_attempt_limit(monkeypatch, tmp_path):
     from multi_agent_research.sections import claim_repair
     from tests.test_claim_repair import repair_from_prompt
     fake = FakeModels()
     install(monkeypatch, fake)
     invalid = True
     execution = ['first']
+    claim_attempts = 0
     monkeypatch.setattr(claim_repair, 'epoch', lambda: execution[0])
 
     async def model(system, prompt, schema=None, *, validator=None, context=None):
-        if schema is claim_repair.ClaimRepairs:
+        nonlocal claim_attempts
+        if schema in {ClaimCandidateBatch, ClaimRepairBatch}:
+            claim_attempts += 1
+        if schema is ClaimRepairBatch:
             output, cost = repair_from_prompt(prompt, invalid), {'tokens': 10, 'unknown': 0}
         else:
             output, cost = await fake.model(system, prompt, schema)
-        if schema is ClaimExtraction and invalid:
-            output.claims[0].evidence[0].quote = "不存在的摘录"
+        if schema is ClaimCandidateBatch and invalid:
+            output.claims[0].evidence[0].segment_id = "E9999"
         return (validator(output) if validator else output), cost
 
     monkeypatch.setattr(workflow, "call_model", model)
@@ -312,11 +320,14 @@ async def test_failed_claim_binding_resumes_without_rewriting_draft(monkeypatch,
         assert child.values["sections"][0]["draft"]
         assert child.values["sections"][0]["claims"] == []
         assert child.values['sections'][0]['claim_work']['attempts'] == 3
+        assert child.values['sections'][0]['claim_work']['total_attempts'] == 3
+        assert claim_attempts == 3
     invalid = False
     execution[0] = 'second'
     async with AsyncSqliteSaver.from_conn_string(database) as saver:
-        result = await build_graph(saver).ainvoke(None, config)
-    assert result["writer_status"] == "complete"
+        with pytest.raises(claim_repair.ClaimsPending):
+            await build_graph(saver).ainvoke(None, config)
+    assert claim_attempts == 3
     assert fake.calls["write:成本"] == 1
 
 

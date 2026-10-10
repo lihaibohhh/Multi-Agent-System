@@ -3,7 +3,7 @@
 const $ = (id) => document.getElementById(id);
 const TERMINAL = new Set(["completed", "failed", "interrupted", "cancelled", "paused", "budget_limited"]);
 const RESUMABLE = new Set(["failed", "interrupted", "paused", "budget_limited"]);
-const AGENTS = ["planner", "evidence-research", "section-writer", "section-reviewer", "report-reviewer"];
+const AGENTS = ["planner", "evidence-research", "section-writer", "section-reviewer", "report-reviewer", "chief-editor"];
 const PROCESSORS = ["claim-binding"];
 const USAGE_STAGE_LABELS = {
   plan_sections: "Planner · 章节规划",
@@ -12,6 +12,11 @@ const USAGE_STAGE_LABELS = {
   section_review: "Section Reviewer · 章节审校",
   section_claims: "Claim Binding · 抽取与修复",
   report_review: "Report Reviewer · 全篇审校",
+  chief_edit: "Chief Editor · 全篇蓝图",
+  chief_edit_section: "Chief Editor · 逐章编辑",
+  chief_compress_section: "Chief Editor · 章节压缩",
+  chief_write_framing: "Chief Editor · 摘要与结论",
+  edited_report_review: "Report Reviewer · 终稿复审",
   retrieval: "Retrieval Service · 只读检索",
   unattributed: "历史/未归属调用",
 };
@@ -92,6 +97,7 @@ function resetPipeline() {
   $("meta-section-reviewer").textContent = "章节语义审校";
   $("meta-claim-binding").textContent = "固定的抽取、校验、修复与绑定流程";
   $("meta-report-reviewer").textContent = "全篇一致性审校";
+  $("meta-chief-editor").textContent = "全篇蓝图、逐章编辑与终稿";
   $("event-log").replaceChildren();
   $("event-cursor").textContent = "event #0";
 }
@@ -580,6 +586,7 @@ function eventMessage(type, data) {
     case "section_plan": return `章节计划已生成，共 ${data.sections?.length || 0} 章`;
     case "section_snapshot": return "已恢复章节草稿与研究进度";
     case "report_review": return "全篇一致性审校完成";
+    case "report_edit": return `${data.stage || "chief_edit"} · 已编辑 ${data.edited_sections || 0} 章`;
     case "section_progress": return `${data.stage} · 已完成 ${(data.sections || []).filter(s => ["complete", "limited"].includes(s.status)).length}/${data.sections?.length || 0} 章`;
     case "run_created": return `任务已创建${data.parent_run_id ? `，父 Run ${shortId(data.parent_run_id)}` : ""}`;
     case "run_started": return "后台执行已启动";
@@ -644,6 +651,15 @@ function handleRunEvent(type, event) {
     }
   }
   if (type === "report_review") setAgent("report-reviewer", "done", "全篇一致性审校完成");
+  if (type === "report_edit") {
+    const labels = {
+      chief_edit: "全篇编辑蓝图已生成",
+      chief_edit_section: `逐章编辑 · 已完成 ${data.edited_sections || 0} 章`,
+      chief_compress_section: `章节压缩与保真校验 · 已完成 ${data.edited_sections || 0} 章`,
+      chief_write_framing: "执行摘要与结论已生成",
+    };
+    setAgent("chief-editor", "done", labels[data.stage] || "主编阶段已完成");
+  }
 
   if (type === "run_started" || type === "run_resumed" || type === "start") {
     setRunStatus("running");
@@ -677,7 +693,7 @@ function handleRunEvent(type, event) {
     state.receivedTerminal = true;
     const status = ({error: "failed", run_interrupted: "interrupted", run_paused: "paused", budget_limited: "budget_limited"})[type];
     setRunStatus(status);
-    const failedAgent = ({section_review:"section-reviewer", section_search:"evidence-research", section_write:"section-writer", report_review:"report-reviewer", plan_sections:"planner"})[data.stage];
+    const failedAgent = ({section_review:"section-reviewer", section_search:"evidence-research", section_write:"section-writer", report_review:"report-reviewer", edited_report_review:"report-reviewer", plan_sections:"planner", chief_edit:"chief-editor", chief_edit_section:"chief-editor", chief_compress_section:"chief-editor", chief_write_framing:"chief-editor"})[data.stage];
     if (data.stage === "section_claims") {
       setProcessor("claim-binding", "error", data.reason === "claims_pending" ? `${data.section_id}：结论关联待修复，展开章节查看详情` : `${data.section_id || ""}：步骤停止，见错误详情`);
     } else if (failedAgent) {

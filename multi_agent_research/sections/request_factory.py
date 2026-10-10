@@ -10,10 +10,10 @@ from ..agents.contracts import (
     SectionReviewRequest,
     SectionWritingRequest,
 )
-from .editorial import stable_editorial_sections
+from .editorial import evidence_tokens, stable_editorial_sections
 from ..processors import ClaimBindingRequest
 from .context_builder import evidence_text, parent_view, section_prompt
-from .models import ReportReview, SectionRecord
+from .models import EditedSectionArtifact, EditorialBlueprint, ReportReview, SectionRecord
 
 
 def planning_request(
@@ -120,15 +120,42 @@ def chief_editor_request(
     state: dict,
     sections: list[SectionRecord],
     coordination_context: str,
+    *,
+    phase: str = "plan",
+    target_section_id: str | None = None,
+    section_candidate: EditedSectionArtifact | None = None,
+    target_min_chars: int | None = None,
+    target_max_chars: int | None = None,
 ) -> tuple[ChiefEditorRequest, dict[str, dict]]:
     stable_sections, evidence_registry = stable_editorial_sections(sections)
+    blueprint = (
+        EditorialBlueprint.model_validate(state["editorial_blueprint"])
+        if state.get("editorial_blueprint")
+        else None
+    )
+    edited_sections = tuple(
+        EditedSectionArtifact.model_validate(item)
+        for item in state.get("editorial_sections", [])
+    )
+    allowed_evidence = set(evidence_registry)
+    if phase == "framing":
+        allowed_evidence = set().union(*(
+            evidence_tokens(item.section.body) for item in edited_sections
+        )) if edited_sections else set()
     return ChiefEditorRequest(
+        phase=phase,
         research_question=state["research_question"],
         sections=tuple(sections),
         report_review=ReportReview.model_validate(state["report_review"]),
         coordination_context=coordination_context,
         stable_sections=stable_sections,
-        evidence_ids=frozenset(evidence_registry),
+        evidence_ids=frozenset(allowed_evidence),
+        blueprint=blueprint,
+        target_section_id=target_section_id,
+        edited_sections=edited_sections,
+        section_candidate=section_candidate,
+        target_min_chars=target_min_chars,
+        target_max_chars=target_max_chars,
         previous_candidate=state.get("edited_report"),
     ), evidence_registry
 

@@ -26,7 +26,7 @@ from multi_agent_research.eval import (
 )
 from multi_agent_research.retrieval import RetrievalRequest
 from multi_agent_research.sections.models import (
-    ChiefEditorResult,
+    EditorialBlueprint,
     ReportReview,
     SectionPlan,
     SectionRecord,
@@ -216,31 +216,31 @@ async def test_six_agent_behavior_baseline_is_deterministic_and_passes() -> None
     )
 
     async def chief_editor_model(*args, validator=None, **kwargs):
-        token = stable_sections[0]["draft"].split("不确定性", 1)[1].split("。", 1)[0]
-        value = ChiefEditorResult(
-            verdict="limited",
-            report_title="公司竞争优势研究报告",
-            executive_summary=f"成本下降，但长期持续性有限{token}。",
-            sections=[{
-                "title": "成本优势及其限制",
-                "body": stable_sections[0]["draft"],
-                "source_section_ids": ["section_1"],
-                "claim_ids": [],
-            }],
-            conclusion="现有资料不足以确认长期持续性。",
-            issue_resolutions=[{
-                "issue_index": 0,
-                "action": "preserved_as_limitation",
-                "explanation": "报告明确区分短期观察与长期不确定性",
-                "section_ids": ["section_1"],
-            }],
-            unresolved_issues=["长期持续性仍需更多时间序列证据"],
-        )
+        value = EditorialBlueprint(**{
+                "verdict": "limited",
+                "report_title": "公司竞争优势研究报告",
+                "thesis": "短期成本改善尚不足以证明长期优势。",
+                "audience": "外部决策者",
+                "style_rules": ["区分短期观察和长期判断"],
+                "section_plans": [{
+                    "source_section_id": "section_1",
+                    "title": "成本优势及其限制",
+                    "purpose": "说明成本变化及长期证据边界",
+                }],
+                "issue_resolutions": [{
+                    "issue_index": 0,
+                    "action": "preserved_as_limitation",
+                    "explanation": "报告明确区分短期观察与长期不确定性",
+                    "section_ids": ["section_1"],
+                }],
+                "unresolved_issues": ["长期持续性仍需更多时间序列证据"],
+        })
         return validator(value), {"tokens": 3, "unknown": 0, "attempts": 1}
 
     chief_editor = await _run(
         ChiefEditorAgent(),
         ChiefEditorRequest(
+            phase="plan",
             research_question="公司的竞争优势能否持续？",
             sections=(section,),
             report_review=chief_review,
@@ -354,10 +354,11 @@ async def test_six_agent_behavior_baseline_is_deterministic_and_passes() -> None
                 expected_model_calls=1,
                 checks=(BehaviorCheck(
                     "editorial_limit_preserved",
-                    "全篇编辑保留证据标记和未解决限制",
-                    lambda item: item.result.output.verdict == "limited"
-                    and bool(item.result.output.unresolved_issues)
-                    and "[[evidence:" in item.result.output.sections[0].body,
+                    "全篇蓝图保留未解决限制并约束章节职责",
+                    lambda item: item.result.output.blueprint.verdict == "limited"
+                    and bool(item.result.output.blueprint.unresolved_issues)
+                    and item.result.output.blueprint.section_plans[0].source_section_id
+                    == "section_1",
                 ),),
             ),
         ),

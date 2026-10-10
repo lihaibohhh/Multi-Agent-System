@@ -14,9 +14,15 @@ from multi_agent_research.runs.models import RunStatus
 from multi_agent_research.runs.service import RunService
 from multi_agent_research.sections import workflow
 from multi_agent_research.sections.artifacts import bind_claims
+from multi_agent_research.sections.claim_candidates import (
+    ClaimCandidateBatch,
+    ClaimRepairBatch,
+)
 from multi_agent_research.sections.model_output import ModelOutputError, invoke_checked
 from multi_agent_research.sections.models import (
-    ChiefEditorResult,
+    EditedSectionArtifact,
+    EditorialBlueprint,
+    EditorialFraming,
     ClaimExtraction,
     QuoteSpan,
     ReportReview,
@@ -221,10 +227,9 @@ async def test_writer_citations_corrected_before_draft_is_accepted():
 
 
 @pytest.mark.asyncio
-async def test_full_graph_schema_parser_business_audit_failure_restart_and_assembly(monkeypatch, tmp_path):
+async def test_full_graph_claim_failure_requires_explicit_refresh_before_assembly(monkeypatch, tmp_path):
     """Real RunService, graph, parser, correction and SQLite; no paid model/KB calls."""
     fake = FakeModels()
-    from multi_agent_research.sections.claim_repair import ClaimRepairs
     from tests.test_claim_repair import repair_from_prompt
     repairs = []
     broken = True
@@ -234,22 +239,28 @@ async def test_full_graph_schema_parser_business_audit_failure_restart_and_assem
         payload = json.loads(request.content)
         system, prompt = payload["messages"][0]["content"], payload["messages"][1]["content"]
         schema = next((s for s in (
-            ClaimRepairs,
-            ClaimExtraction,
+            ClaimRepairBatch,
+            ClaimCandidateBatch,
             SectionPlan,
             SectionReview,
             ReportReview,
-            ChiefEditorResult,
+                EditorialBlueprint,
+                EditedSectionArtifact,
+                EditorialFraming,
         )
                        if f'"title": "{s.__name__}"' in system), None)
-        if schema is ClaimRepairs:
+        if schema is ClaimRepairBatch:
             repairs.append(prompt)
             value = repair_from_prompt(prompt, broken)
         else:
             value, _ = await fake.raw_model(system, prompt, schema)
-        if broken and schema is ClaimExtraction and "本章：渠道\n" in prompt:
+        if (
+            broken
+            and schema is ClaimCandidateBatch
+            and "本章：渠道\n" in json.loads(prompt)["section_context"]
+        ):
             value.claims.append(value.claims[0].model_copy(deep=True))
-            value.claims[0].evidence[0].quote = "不存在的原文"
+            value.claims[0].evidence[0].segment_id = "E9999"
         output = value.model_dump_json() if schema else value
         return httpx.Response(200, json={"id": "test", "object": "chat.completion", "created": 1,
             "model": "test", "choices": [{"index": 0, "message": {"role": "assistant", "content": output},
@@ -286,18 +297,39 @@ async def test_full_graph_schema_parser_business_audit_failure_restart_and_assem
         broken = False
         async with AsyncSqliteSaver.from_conn_string(database) as saver:
             app = build_graph(saver)
+            async def get_resumed_app():
+                return app
+            monkeypatch.setattr(streaming, "_get_app", get_resumed_app)
             await service.start_run("business-e2e", resume=True)
             await asyncio.wait_for(service._tasks["business-e2e"], 30)
-            result = await service.get_run("business-e2e")
+            still_paused = await service.get_run("business-e2e")
+            assert still_paused.status == RunStatus.PAUSED
+            assert still_paused.sections[1].claim_work['attempts'] == 3
+            assert still_paused.sections[1].claim_work['total_attempts'] == 3
+            child = await service.create_section_operation(
+                "business-e2e",
+                "section_2",
+                mode="refresh",
+                instruction="刷新来源并重新写作后绑定 Claim",
+                new_run_id="business-e2e-refresh",
+            )
+            await service.start_run(child.run_id)
+            await asyncio.wait_for(service._tasks[child.run_id], 30)
+            result = await service.get_run(child.run_id)
     assert result.status == RunStatus.COMPLETED and "参考来源" in result.final_report
     assert result.report_review.verdict == "pass"
     assert all(section.claims for section in result.sections)
-    assert result.sections[1].claims[1].model_dump() == accepted_before
-    assert result.budget['known_tokens'] > failed.budget['known_tokens'] > 0
-    assert result.sections[1].claim_work['total_attempts'] == 4
-    assert fake.calls["write:成本"] == fake.calls["write:渠道"] == 1
-    assert fake.calls["claims:渠道"] == 1 and len(repairs) == 3
-    assert result.model_usage["attempts"] == len(store.diagnostics)
-    assert result.model_usage["tokens"] == 10 * len(store.diagnostics)
+    assert accepted_before['claim_id'].endswith(':c2')
+    assert result.budget['known_tokens'] > 0 and failed.budget['known_tokens'] > 0
+    assert result.budget_id != failed.budget_id
+    assert result.sections[1].claim_work['total_attempts'] == 1
+    assert fake.calls["write:成本"] == 1
+    assert fake.calls["write:渠道"] == 2
+    assert fake.calls["claims:渠道"] == 2 and len(repairs) == 2
+    child_diagnostics = [
+        record for record in store.diagnostics if record.get("run_id") == child.run_id
+    ]
+    assert result.model_usage["attempts"] == len(child_diagnostics)
+    assert result.model_usage["tokens"] == 10 * len(child_diagnostics)
     assert store.events[-1].event_type == "done"
     await service.shutdown()

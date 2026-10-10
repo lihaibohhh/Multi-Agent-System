@@ -8,8 +8,12 @@ import pytest
 from multi_agent_research.agents.registry import AgentRegistry, agent_registry
 from multi_agent_research.processors import ClaimBindingProcessor, ClaimBindingRequest
 from multi_agent_research.sections import claim_repair
+from multi_agent_research.sections.claim_candidates import (
+    ClaimCandidateBatch,
+    ClaimRepairBatch,
+)
 from multi_agent_research.sections.model_output import ModelOutputError
-from multi_agent_research.sections.models import ClaimExtraction, SectionRecord
+from multi_agent_research.sections.models import SectionRecord
 
 
 def _example() -> tuple[SectionRecord, dict, dict]:
@@ -59,6 +63,22 @@ def _request(section: SectionRecord, work: dict) -> ClaimBindingRequest:
     )
 
 
+def _candidate_from_prompt(prompt: str, *, statement: str, draft_contains: str) -> dict:
+    view = json.loads(prompt)
+    draft = next(
+        key
+        for key, value in view["segments"].items()
+        if key.startswith("D") and draft_contains in value["text"]
+    )
+    source = next(key for key in view["segments"] if key.startswith("E"))
+    return {
+        "statement": statement,
+        "draft_segment_id": draft,
+        "assessment": "supported",
+        "evidence": [{"segment_id": source, "relation": "supports"}],
+    }
+
+
 def test_claim_binding_is_a_processor_not_a_registered_agent() -> None:
     assert "claim_extractor" not in {field.name for field in fields(AgentRegistry)}
     assert not hasattr(agent_registry, "claim_extractor")
@@ -72,7 +92,15 @@ async def test_processor_owns_initial_prompt_binding_and_attempt_accounting() ->
 
     async def call_model(system, prompt, schema=None, *, validator=None, context=None):
         captured.update(system=system, prompt=prompt, schema=schema, context=context)
-        extraction = ClaimExtraction(claims=[good])
+        extraction = ClaimCandidateBatch(
+            claims=[
+                _candidate_from_prompt(
+                    prompt,
+                    statement=good["statement"],
+                    draft_contains="其他已经通过的结论",
+                )
+            ]
+        )
         return validator(extraction), {"tokens": 17, "unknown": 0, "attempts": 1}
 
     result = await ClaimBindingProcessor().process_attempt(
@@ -89,7 +117,7 @@ async def test_processor_owns_initial_prompt_binding_and_attempt_accounting() ->
     assert initial["accepted"] == {}
     assert initial["attempts"] == 0
     assert result.cost["tokens"] == 17
-    assert captured["schema"] is ClaimExtraction
+    assert captured["schema"] is ClaimCandidateBatch
     assert captured["context"] == {
         "processor": "claim_binding",
         "model_component": "claim_candidate_extractor",
@@ -101,7 +129,8 @@ async def test_processor_owns_initial_prompt_binding_and_attempt_accounting() ->
         "claim_mode": "extract",
     }
     assert "不声称穷尽" in captured["system"]
-    assert "草稿：\n头部企业的马太效应凸显" in captured["prompt"]
+    assert "头部企业的马太效应凸显" in captured["prompt"]
+    assert "draft_quote" not in captured["schema"].model_json_schema()["$defs"]["ClaimCandidate"]["properties"]
 
 
 @pytest.mark.asyncio
@@ -114,17 +143,16 @@ async def test_processor_repairs_only_pending_slots() -> None:
     async def call_model(system, prompt, schema=None, *, validator=None, context=None):
         captured.update(system=system, prompt=prompt, schema=schema, context=context)
         view = json.loads(prompt)
-        draft_span = next(key for key in view["excerpts"] if key.startswith("D:"))
-        source_span = next(key for key in view["excerpts"] if key.startswith("S"))
+        draft_span = next(key for key in view["segments"] if key.startswith("D"))
+        source_span = next(key for key in view["segments"] if key.startswith("E"))
         patches = claim_repair.ClaimRepairs(
             repairs=[
                 {
                     "slot": 2,
-                    "statement": bad["statement"],
-                    "draft_span_id": draft_span,
+                    "draft_segment_id": draft_span,
                     "assessment": "supported",
                     "evidence": [
-                        {"source_span_id": source_span, "relation": "supports"}
+                        {"segment_id": source_span, "relation": "supports"}
                     ],
                 }
             ]
@@ -136,7 +164,7 @@ async def test_processor_repairs_only_pending_slots() -> None:
         call_model=call_model,
     )
 
-    assert captured["schema"] is claim_repair.ClaimRepairs
+    assert captured["schema"] is ClaimRepairBatch
     assert captured["context"]["claim_mode"] == "repair"
     assert "只修复给出的 pending Claim" in captured["system"]
     assert "不能被重写的通过项" not in captured["prompt"]
@@ -148,15 +176,20 @@ async def test_processor_repairs_only_pending_slots() -> None:
 
 @pytest.mark.asyncio
 async def test_processor_salvages_valid_siblings_from_retryable_output() -> None:
-    section, bad, good = _example()
-    malformed = dict(bad, assessment="invalid")
+    section, _, good = _example()
 
     async def call_model(system, prompt, schema=None, *, validator=None, context=None):
+        valid = _candidate_from_prompt(
+            prompt,
+            statement=good["statement"],
+            draft_contains="其他已经通过的结论",
+        )
+        malformed = dict(valid, assessment="invalid")
         raise ModelOutputError(
             "schema failed",
             record={
                 "retryable": True,
-                "raw": json.dumps({"claims": [good, malformed]}, ensure_ascii=False),
+                "raw": json.dumps({"claims": [valid, malformed]}, ensure_ascii=False),
                 "errors": [{"field": "claims.1.assessment", "message": "invalid"}],
                 "diagnostic_id": "diag-claim",
             },
@@ -174,3 +207,30 @@ async def test_processor_salvages_valid_siblings_from_retryable_output() -> None
     assert result.work["attempts"] == 1
     assert result.completed is False
     assert result.cost["tokens"] == 11
+
+
+@pytest.mark.asyncio
+async def test_unparseable_initial_batch_never_becomes_empty_success() -> None:
+    section, _, _ = _example()
+
+    async def call_model(system, prompt, schema=None, *, validator=None, context=None):
+        raise ModelOutputError(
+            "schema failed",
+            record={
+                "retryable": True,
+                "raw": "not-json",
+                "errors": [{"field": "$", "type": "json_invalid", "message": "invalid"}],
+                "diagnostic_id": "diag-invalid-json",
+            },
+            cost={"tokens": 5, "unknown": 0, "attempts": 1},
+        )
+
+    result = await ClaimBindingProcessor().process_attempt(
+        _request(section, claim_repair.new_work(section)),
+        call_model=call_model,
+    )
+
+    assert result.completed is False
+    assert result.claims == ()
+    assert result.work["batch_errors"][0]["type"] == "json_invalid"
+    assert result.work["attempts"] == 1

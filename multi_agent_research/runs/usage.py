@@ -15,9 +15,12 @@ _STAGE_ORDER = {
     "section_claims": 4,
     "report_review": 5,
     "chief_edit": 6,
-    "edited_report_review": 7,
-    "retrieval": 8,
-    "unattributed": 9,
+    "chief_edit_section": 7,
+    "chief_compress_section": 8,
+    "chief_write_framing": 9,
+    "edited_report_review": 10,
+    "retrieval": 11,
+    "unattributed": 12,
 }
 
 

@@ -244,7 +244,7 @@ class AgentConfig(BaseSettings):
     section_max_revisions: int = Field(default=1, ge=0, le=3)
 
     run_max_model_calls: int = Field(default=80, gt=0, le=1000)
-    run_max_tokens: int = Field(default=600_000, gt=0)
+    run_max_tokens: int = Field(default=800_000, gt=0)
     run_max_retrieval_calls: int = Field(default=80, gt=0, le=1000)
     run_timeout: float = Field(default=3600, gt=0, description="每次执行的时限；恢复重新计时，累计调用额度不重置")
     model_call_timeout: float = Field(default=120, gt=0)

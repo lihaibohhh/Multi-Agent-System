@@ -5,9 +5,9 @@ const { readFileSync } = require('node:fs');
 const { join } = require('node:path');
 const vm = require('node:vm');
 
-test('pipeline distinguishes five role agents from Claim processor and retrieval service', () => {
+test('pipeline distinguishes six role agents from Claim processor and retrieval service', () => {
   const html = readFileSync(join(__dirname, '../multi_agent_research/api/static/index.html'), 'utf8');
-  for (const id of ['planner', 'evidence-research', 'section-writer', 'section-reviewer', 'report-reviewer']) {
+  for (const id of ['planner', 'evidence-research', 'section-writer', 'section-reviewer', 'report-reviewer', 'chief-editor']) {
     assert.match(html, new RegExp(`id="agent-${id}"`));
   }
   assert.match(html, /id="processor-claim-binding"/);
@@ -17,6 +17,17 @@ test('pipeline distinguishes five role agents from Claim processor and retrieval
   assert.match(html, /非 Agent：Retrieval Service/);
   assert.match(html, /id="internal-audit"/);
   assert.match(html, /不属于正式报告正文/);
+});
+
+test('report edit events update the Chief Editor card', () => {
+  const { context, nodes } = setup();
+  context.event = {lastEventId: '42', data: JSON.stringify({
+    run_id: 'run1', stage: 'chief_compress_section', edited_sections: 2,
+  })};
+  vm.runInContext(`state.currentRun={run_id:'run1',status:'running'};
+    handleRunEvent('report_edit', event);`, context);
+  assert.equal(nodes.get('agent-chief-editor').className, 'agent done');
+  assert.match(nodes.get('meta-chief-editor').textContent, /压缩与保真校验/);
 });
 
 function setup() {

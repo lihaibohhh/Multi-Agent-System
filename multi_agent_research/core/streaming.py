@@ -27,11 +27,18 @@ def _chapter_event(node: str, output: dict, run_id: str):
         return None
     if node in {"report_review", "edited_report_review"}:
         return "report_review", {"run_id": run_id, "report_review": output["report_review"]}
-    if node == "chief_edit":
+    if node in {
+        "chief_edit",
+        "chief_edit_section",
+        "chief_compress_section",
+        "chief_write_framing",
+    }:
         return "report_edit", {
             "run_id": run_id,
             "editorial_attempts": output.get("editorial_attempts", 0),
             "verdict": (output.get("edited_report") or {}).get("verdict"),
+            "stage": node,
+            "edited_sections": len(output.get("editorial_sections", [])),
         }
     if node == "assemble_report":
         return "report_ready", {"run_id": run_id, **_parse_writer(output)}

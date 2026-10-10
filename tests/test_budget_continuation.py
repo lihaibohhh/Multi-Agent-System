@@ -214,7 +214,7 @@ async def test_real_graph_pause_checkpoint_reopen_keeps_completed_chapter(monkey
     row = store.runs["pause-reopen"]
     assert row.status == RunStatus.COMPLETED
     assert fake.calls["write:成本"] == fake.calls["write:渠道"] == 1
-    # Two chapter pipelines plus pre-review, ChiefEditor and post-edit review.
-    assert row.budget["model_calls"] == 16 and row.budget["known_tokens"] == 160
+    # Two chapter pipelines plus review, plan/three chapter edits/framing and post-review.
+    assert row.budget["model_calls"] == 20 and row.budget["known_tokens"] == 200
     assert before["model_calls"] < row.budget["model_calls"]
     assert all(row.budget["reservations"][key] == entry for key, entry in before["reservations"].items())

@@ -83,9 +83,10 @@ async def test_invalid_json_enum_and_type_use_real_parser(bad):
 @pytest.mark.asyncio
 async def test_truncation_does_not_waste_format_retries():
     async with fake_provider([GOOD], finish="length") as (model, requests), audit() as records:
-        with pytest.raises(ModelOutputError, match="长度上限"):
+        with pytest.raises(ModelOutputError, match="长度上限") as caught:
             await invoke_checked(model, "JSON", "context", SectionReview)
     assert len(requests) == 1 and records[0]["errors"][0]["type"] == "truncated"
+    assert caught.value.cost == {"tokens": 10, "unknown": 0, "attempts": 1}
 
 
 @pytest.mark.asyncio
@@ -126,4 +127,5 @@ async def test_transport_error_is_recorded_but_not_treated_as_format_error():
         with pytest.raises(ModelOutputError) as caught:
             await invoke_checked(Broken(), "JSON", "context", SectionReview)
     assert len(records) == 1 and records[0]["unknown"] == 1
+    assert caught.value.cost == {"tokens": 0, "unknown": 1, "attempts": 1}
     assert "must not leak" not in str(caught.value)

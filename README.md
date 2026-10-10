@@ -19,7 +19,8 @@
 生命周期事件和局部 Checkpoint。EvidenceResearchAgent 拥有只读工具白名单和
 有界研究循环；SectionWriterAgent 拥有确定性校验和最多三次完整重写循环。详见
 [Agent Runtime 分阶段迁移基线](docs/agent-runtime-migration.md)。Claim 抽取、校验、局部修复和产物绑定已经收归
-`ClaimBindingProcessor`，它是固定流程处理器，不属于 Agent。
+`ClaimBindingProcessor`，它是固定流程处理器，不属于 Agent。模型只选择版本化的
+`D/E` 不透明片段 ID，Claim/Evidence 身份、原文和字符偏移均由程序生成。
 
 Agent 角色模块统一使用 `*_agent.py`。`agents/contracts.py` 和
 `agents/registry.py` 是契约与装配设施，不是 Agent。
@@ -41,7 +42,12 @@ ClaimBindingProcessor（非 Agent）
     ↓
 下一章节 / ReportReviewerAgent
     ↓
-ChiefEditorAgent
+ChiefEditorAgent：全篇蓝图
+    ↓
+ChiefEditorAgent：按蓝图逐章编辑（每章独立 Checkpoint）
+    └─ 超出动态篇幅 → 保真压缩（最多 2 次）/ 回退审校稿
+    ↓
+ChiefEditorAgent：摘要与结论
     ↓
 ReportReviewerAgent（编辑后独立复审）
     ↓
@@ -70,7 +76,11 @@ ReportReviewerAgent（编辑后独立复审）
 `agents/spec.py`、`agents/context.py`、`agents/events.py` 和 `agents/runtime.py`
 已经提供独立 Agent Runtime 内核；六个业务 Agent 均已接入。Agent 执行记录、生命周期
 事件及受限 JSON Checkpoint 已保存到 Run Repository，并受 execution_id 栅栏保护；
-LangGraph 已升级为 v6 父图加单章节子图。六个业务 Agent 已具备固定行为评测样本，模型超时、检索
+LangGraph 使用 v6 父图加单章节子图。ChiefEditorAgent 在同一 Agent 身份下执行共享蓝图、
+逐章编辑和摘要/结论三个有界阶段；父图在蓝图、每章和 framing 后分别提交 Checkpoint。
+章节篇幅使用 Claim/Evidence 容量和原稿长度动态计算；结构正确但偏长的候选稿先持久化，
+再进入不超过两次的保真压缩。压缩无实质进展、输出截断或删除必须的 Claim/Evidence 时，
+系统停止付费重试并回退到审校通过的稳定章节。六个业务 Agent 已具备固定行为评测样本，模型超时、检索
 超时、暂停、预算、依赖失败、Checkpoint 后崩溃恢复和过期执行已有故障注入基线。
 当前先完成旧链路清理和人工运行验收；只有人工验收通过后，才研究章节 DAG 并行。
 
@@ -96,7 +106,7 @@ Agent 工具必须通过 Runtime 白名单以异步方式调用。只读 Trace �
 - 中断恢复会创建新的 Agent 执行并链接上一条 `agent_run_id`，已完成的同输入结果不会重复调用模型或检索。
 - 章节、草稿、已通过的 Claim 和检索回执可独立恢复。
 - 单条成功检索会持久化；同批其他查询失败时，恢复会复用成功结果。
-- Claim 修复保存已通过项，只重试 pending 项。
+- Claim 修复保存已通过项，只重试 pending 项；普通恢复不重置累计尝试上限。
 - 当前状态版本为 `workflow_version=6`；v5 及更早的工作流 Checkpoint 不再支持。
 - 每次 `section_cycle` 只处理一个章节，完成后回到父图固化产物，再进入下一章。
 - 子图暂停或失败时，父图保存 `section_cycle`，子图命名空间保存具体待恢复节点。

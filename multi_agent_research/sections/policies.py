@@ -47,8 +47,13 @@ def next_step_after_review(
 def claim_gate(state: dict) -> dict:
     section = current_section(state)
     work = section.claim_work
-    if work.get("epoch") == claim_repair.epoch() and work.get("attempts", 0) >= 3:
+    if (
+        work.get("protocol_version") == claim_repair.CLAIM_PROTOCOL_VERSION
+        and claim_repair.retry_blocked(work)
+    ):
         raise claim_repair.ClaimsPending(section)
+    # Older work must reach the processor once so it can migrate safely. The
+    # migrated state then uses the current persistent retry fence.
     return {"section_step": "claims"}
 
 
@@ -82,6 +87,12 @@ def route_parent(state: dict) -> str:
         return "report_review"
     if step == "chief_edit":
         return "chief_edit"
+    if step == "chief_edit_section":
+        return "chief_edit_section"
+    if step == "chief_compress_section":
+        return "chief_compress_section"
+    if step == "chief_write_framing":
+        return "chief_write_framing"
     if step == "edited_report_review":
         return "edited_report_review"
     if step == "assemble":

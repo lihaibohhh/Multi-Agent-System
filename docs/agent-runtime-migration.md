@@ -124,9 +124,11 @@ LangGraph 确定性编排器
    v5，v4 Checkpoint 明确拒绝恢复；`section_analyze` 兼容入口已删除。
 10. **已完成：**增加 `ChiefEditorAgent`、稳定 Evidence Token、编辑后独立复审和
     确定性引用渲染。父图升级为 v6，v5 及更早 Checkpoint 明确拒绝恢复。
+    后续在不改变六 Agent 边界的前提下，将 ChiefEditor 改为共享蓝图、逐章编辑、
+    摘要/结论三个有界阶段；保留原 `chief_edit` 入口以兼容在途 v6 Checkpoint。
 11. **已完成：**删除孤立旧工具链和失效配置，将仍有价值的测试迁移到当前
-    `retrieval/` 边界。完整自动化回归结果为 230 passed、8 个需显式启用的 PostgreSQL
-    集成测试 skipped；前端 DOM 契约 16 passed，Ruff 与补丁空白检查通过。
+    `retrieval/` 边界。完整自动化回归结果为 262 passed、13 个需显式启用的 PostgreSQL
+    集成测试 skipped；前端 DOM 契约 19 passed，Ruff 与补丁空白检查通过。
 12. **人工验收闸门：**按 `docs/manual-smoke-test.md` 验证真实服务、浏览器主流程、
     暂停恢复和最终报告。人工验收通过前不改变章节调度方式。
 13. **后续候选优化：**只有人工验收通过后，才在依赖、预算、评测和执行栅栏约束下
@@ -140,6 +142,8 @@ LangGraph 确定性编排器
 - 章节子图曾将版本从 v4 升级为 v5；主编编辑与编辑后复审节点进一步将当前版本升级为
   `workflow_version=6`。
 - v5 及更早的在途任务不得迁移到 v6 图中，恢复时会明确拒绝；用户需要创建新 Run。
+- 分阶段主编属于 v6 内的向后兼容扩展：旧 v6 的 `chief_edit` 待执行节点仍存在，进入后
+  初始化新增的编辑蓝图与逐章状态，不重做研究、章节写作或 Claim 绑定。
 - 版本升级必须明确选择迁移或拒绝恢复，不得静默重跑已有研究。
 
 ## 强制访问边界

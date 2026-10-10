@@ -111,6 +111,18 @@ async def edit_report(state: dict, config: RunnableConfig | None = None) -> dict
     return await editorial_nodes.edit_report(state, config, runner=agent_runner)
 
 
+async def edit_report_section(state: dict, config: RunnableConfig | None = None) -> dict:
+    return await editorial_nodes.edit_report_section(state, config, runner=agent_runner)
+
+
+async def compress_report_section(state: dict, config: RunnableConfig | None = None) -> dict:
+    return await editorial_nodes.compress_report_section(state, config, runner=agent_runner)
+
+
+async def write_report_framing(state: dict, config: RunnableConfig | None = None) -> dict:
+    return await editorial_nodes.write_report_framing(state, config, runner=agent_runner)
+
+
 async def review_edited_report(state: dict, config: RunnableConfig | None = None) -> dict:
     return await editorial_nodes.review_edited_report(state, config, runner=agent_runner)
 
@@ -120,8 +132,10 @@ __all__ = [
     "assemble_sections",
     "call_model",
     "claim_gate",
+    "compress_report_section",
     "extract_claims",
     "edit_report",
+    "edit_report_section",
     "plan_sections",
     "research_section",
     "resolve_agent_model",
@@ -130,4 +144,5 @@ __all__ = [
     "review_section",
     "route_parent",
     "write_section",
+    "write_report_framing",
 ]

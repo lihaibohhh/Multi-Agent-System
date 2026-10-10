@@ -120,14 +120,25 @@ async def invoke_checked(model, system: str, prompt: str, schema=None, *,
                           raw=_redact(text)[:RAW_LIMIT], raw_truncated=len(text) > RAW_LIMIT,
                           finish_reason="length",
                           errors=[{"field": "$", "type": "truncated", "message": "模型输出达到长度上限"}])
+            cost["tokens"] += record["tokens"]
+            cost["unknown"] += record["unknown"]
             await _save_attempt(record)
-            raise ModelOutputError(f"模型输出达到长度上限；诊断 ID {diagnostic_id}") from None
+            raise ModelOutputError(
+                f"模型输出达到长度上限；诊断 ID {diagnostic_id}",
+                record=record,
+                cost=cost,
+            ) from None
         except Exception as exc:
             # Transport/auth failures are not JSON failures; do not retry them here.
             record["errors"] = [{"field": "$", "type": type(exc).__name__,
                                  "message": "Model request failed before a usable response"}]
+            cost["unknown"] += 1
             await _save_attempt(record)
-            raise ModelOutputError(f"模型请求失败：{type(exc).__name__}；诊断 ID {diagnostic_id}") from None
+            raise ModelOutputError(
+                f"模型请求失败：{type(exc).__name__}；诊断 ID {diagnostic_id}",
+                record=record,
+                cost=cost,
+            ) from None
 
         raw = response["raw"] if schema else response
         metadata = getattr(raw, "response_metadata", {}) or {}

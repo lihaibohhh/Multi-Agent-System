@@ -22,6 +22,9 @@ def _build_state_graph() -> StateGraph:
     graph.add_node("section_cycle", compile_section_subgraph())
     graph.add_node("report_review", chapters.review_report)
     graph.add_node("chief_edit", chapters.edit_report)
+    graph.add_node("chief_edit_section", chapters.edit_report_section)
+    graph.add_node("chief_compress_section", chapters.compress_report_section)
+    graph.add_node("chief_write_framing", chapters.write_report_framing)
     graph.add_node("edited_report_review", chapters.review_edited_report)
     graph.add_node("assemble_report", chapters.assemble_sections)
     graph.set_entry_point("plan_sections")
@@ -30,6 +33,9 @@ def _build_state_graph() -> StateGraph:
         "section_cycle": "section_cycle",
         "report_review": "report_review",
         "chief_edit": "chief_edit",
+        "chief_edit_section": "chief_edit_section",
+        "chief_compress_section": "chief_compress_section",
+        "chief_write_framing": "chief_write_framing",
         "edited_report_review": "edited_report_review",
         "assemble_report": "assemble_report",
     }
@@ -37,6 +43,9 @@ def _build_state_graph() -> StateGraph:
     graph.add_conditional_edges("section_cycle", chapters.route_parent, parent_routes)
     graph.add_conditional_edges("report_review", chapters.route_parent, parent_routes)
     graph.add_conditional_edges("chief_edit", chapters.route_parent, parent_routes)
+    graph.add_conditional_edges("chief_edit_section", chapters.route_parent, parent_routes)
+    graph.add_conditional_edges("chief_compress_section", chapters.route_parent, parent_routes)
+    graph.add_conditional_edges("chief_write_framing", chapters.route_parent, parent_routes)
     graph.add_conditional_edges("edited_report_review", chapters.route_parent, parent_routes)
     graph.add_edge("assemble_report", END)
 

@@ -37,6 +37,12 @@ class ResearchState(TypedDict):
     report_quality: str
     report_review: dict | None
     edited_report: dict | None
+    editorial_blueprint: dict | None
+    editorial_sections: list[dict]
+    editorial_active_index: int
+    editorial_candidate: dict | None
+    editorial_compression: dict
+    editorial_warnings: list[str]
     editorial_attempts: int
     model_calls: int
     usage_unknown_calls: int
@@ -65,6 +71,12 @@ def initial_state(question: str, parent_context: dict | None = None) -> Research
         report_quality="pending",
         report_review=None,
         edited_report=None,
+        editorial_blueprint=None,
+        editorial_sections=[],
+        editorial_active_index=0,
+        editorial_candidate=None,
+        editorial_compression={},
+        editorial_warnings=[],
         editorial_attempts=0,
         model_calls=0,
         usage_unknown_calls=0,

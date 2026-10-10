@@ -52,7 +52,7 @@
 | SectionWriterAgent | 首稿引用越界后本地重写 | 最终引用有效、限制得到披露、没有样本中的无依据确定性表述 |
 | SectionReviewerAgent | 模型返回 `pass` 但同时提出问题 | 问题得到保留，结论确定性降级为 `revise` |
 | ReportReviewerAgent | 全篇存在已知章节的范围问题 | 问题引用有效章节，结论降级为 `revise` |
-| ChiefEditorAgent | 全篇存在口径限制且引用已稳定化 | 保留 Evidence 血缘、逐项处理问题并输出 `limited` |
+| ChiefEditorAgent | 全篇存在口径限制且引用已稳定化 | 蓝图逐项处理问题并输出 `limited`；逐章阶段只能使用分配的 Claim/Evidence；超长候选稿先 Checkpoint，压缩停滞后回退；framing 不重写正文 |
 
 “无依据生成”目前采用两层确定性防线：引用编号必须属于当前来源表；固定样本中的证据
 限制必须保留，不能改写为确定性结论。真正的开放域事实正确性仍需要后续真实模型评测、

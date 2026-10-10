@@ -3,9 +3,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, NotRequired, Protocol, TypedDict
+from typing import Any, Awaitable, Callable, Literal, NotRequired, Protocol, TypedDict
 
-from ..sections.models import ReportReview, SectionRecord, SectionReview
+from ..sections.models import (
+    EditedSectionArtifact,
+    EditorialBlueprint,
+    ReportReview,
+    SectionRecord,
+    SectionReview,
+)
 
 
 class ModelCost(TypedDict):
@@ -113,12 +119,19 @@ class ReportReviewRequest:
 
 @dataclass(frozen=True, slots=True)
 class ChiefEditorRequest:
-    """Bounded, evidence-addressed inputs for whole-report semantic editing."""
+    """One bounded phase of whole-report semantic editing."""
 
+    phase: Literal["plan", "section", "compress", "framing"]
     research_question: str
     sections: tuple[SectionRecord, ...]
     report_review: ReportReview
     coordination_context: str
     stable_sections: tuple[dict[str, Any], ...]
     evidence_ids: frozenset[str]
+    blueprint: EditorialBlueprint | None = None
+    target_section_id: str | None = None
+    edited_sections: tuple[EditedSectionArtifact, ...] = ()
+    section_candidate: EditedSectionArtifact | None = None
+    target_min_chars: int | None = None
+    target_max_chars: int | None = None
     previous_candidate: dict[str, Any] | None = None
