@@ -21,17 +21,23 @@ def _build_state_graph() -> StateGraph:
     graph.add_node("plan_sections", chapters.plan_sections)
     graph.add_node("section_cycle", compile_section_subgraph())
     graph.add_node("report_review", chapters.review_report)
+    graph.add_node("chief_edit", chapters.edit_report)
+    graph.add_node("edited_report_review", chapters.review_edited_report)
     graph.add_node("assemble_report", chapters.assemble_sections)
     graph.set_entry_point("plan_sections")
 
     parent_routes = {
         "section_cycle": "section_cycle",
         "report_review": "report_review",
+        "chief_edit": "chief_edit",
+        "edited_report_review": "edited_report_review",
         "assemble_report": "assemble_report",
     }
     graph.add_conditional_edges("plan_sections", chapters.route_parent, parent_routes)
     graph.add_conditional_edges("section_cycle", chapters.route_parent, parent_routes)
     graph.add_conditional_edges("report_review", chapters.route_parent, parent_routes)
+    graph.add_conditional_edges("chief_edit", chapters.route_parent, parent_routes)
+    graph.add_conditional_edges("edited_report_review", chapters.route_parent, parent_routes)
     graph.add_edge("assemble_report", END)
 
     return graph

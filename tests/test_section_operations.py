@@ -32,7 +32,7 @@ async def test_supplement_preserves_body_and_claims_then_continue_rebuilds_only_
     calls = deepcopy(fake.calls)
     child = await service.create_section_operation("parent", "section_1", mode="supplement",
         instruction="只补充最新成本证据", new_run_id="evidence-child")
-    assert child.budget_id == store.runs["parent"].budget_id
+    assert child.budget_id != store.runs["parent"].budget_id
     assert child.status == RunStatus.CREATED and fake.calls == calls
     done = await execute(service, store, child)
     target = done.sections[0]
@@ -143,7 +143,7 @@ async def test_operation_api_rejects_running_unknown_mode_and_empty_instruction(
     response = client.post(path, json={"mode": "supplement", "instruction": "补充最新成本证据"})
     assert response.status_code == 201 and response.json()["status"] == "created"
     assert not service._tasks
-    assert response.json()["budget_id"] == store.runs["parent"].budget_id
+    assert response.json()["budget_id"] != store.runs["parent"].budget_id
     store.runs["parent"].status = RunStatus.RUNNING
     assert client.post(path, json={"mode": "refresh", "instruction": "补充最新成本证据"}).status_code == 409
 

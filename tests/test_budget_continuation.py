@@ -41,7 +41,7 @@ def test_old_budget_requires_migration_preserves_every_usage_field():
 
 
 @pytest.mark.asyncio
-async def test_children_share_budget_independent_research_does_not():
+async def test_every_run_has_an_independent_budget_account():
     store, service = MemoryRunStore(), None
     service = RunService(store)
     parent = await service.create_run(question="parent research", run_id="parent")
@@ -50,11 +50,12 @@ async def test_children_share_budget_independent_research_does_not():
     await store.settle_budget("parent", record.execution_id, "one", 123)
     await store.finish_execution("parent", record.execution_id, RunStatus.COMPLETED, {"report": "saved report"})
     child = await service.create_run(question="continue same research", parent_run_id="parent", run_id="child")
-    assert child.budget_id == parent.budget_id
-    assert child.budget["known_tokens"] == 123
+    assert child.budget_id != parent.budget_id
+    assert child.budget["known_tokens"] == 0
     started = await store.begin_execution("child", (RunStatus.CREATED,), resume=False)
     await store.reserve_budget("child", started.execution_id, "two", "model", 300, "review")
-    assert (await service.get_run("parent")).budget["charged_tokens"] == 423
+    assert (await service.get_run("parent")).budget["charged_tokens"] == 123
+    assert (await service.get_run("child")).budget["charged_tokens"] == 300
     independent = await service.create_run(question="different research", session_id=parent.session_id)
     assert independent.budget_id != parent.budget_id
     assert independent.budget["charged_tokens"] == 0
@@ -213,6 +214,7 @@ async def test_real_graph_pause_checkpoint_reopen_keeps_completed_chapter(monkey
     row = store.runs["pause-reopen"]
     assert row.status == RunStatus.COMPLETED
     assert fake.calls["write:成本"] == fake.calls["write:渠道"] == 1
-    assert row.budget["model_calls"] == 14 and row.budget["known_tokens"] == 140
+    # Two chapter pipelines plus pre-review, ChiefEditor and post-edit review.
+    assert row.budget["model_calls"] == 16 and row.budget["known_tokens"] == 160
     assert before["model_calls"] < row.budget["model_calls"]
     assert all(row.budget["reservations"][key] == entry for key, entry in before["reservations"].items())

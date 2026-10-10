@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Sequence
 from contextlib import asynccontextmanager
+from copy import deepcopy
 from typing import Protocol
 from uuid import uuid4
 
@@ -23,10 +25,13 @@ from .models import (
     ParentContextSnapshot,
     RunEventRecord,
     RunRecord,
+    RunUsageSummary,
     RunStatus,
     RunSnapshot,
     SessionRecord,
 )
+from .usage import summarize_run_usage
+from ..coordination.models import CoordinationSnapshot, CoordinationUnitWrite
 
 
 class RunNotFoundError(LookupError):
@@ -85,6 +90,7 @@ class RunStore(Protocol):
     ) -> RunRecord: ...
 
     async def get_run(self, run_id: str) -> RunRecord | None: ...
+    async def get_run_usage(self, run_id: str) -> RunUsageSummary: ...
     async def get_snapshot(self, run_id: str) -> RunSnapshot: ...
     async def record_model_attempt(self, run_id: str, execution_id: str | None, data: dict) -> None: ...
     async def record_agent_event(self, run_id: str, execution_id: str,
@@ -98,8 +104,19 @@ class RunStore(Protocol):
                                status: RunStatus, payload: dict) -> RunRecord: ...
     async def save_sections(self, run_id: str, sections: list[dict]) -> None: ...
     async def save_report_review(self, run_id: str, review: dict | None) -> None: ...
+    async def save_coordination_unit(self, unit: CoordinationUnitWrite | dict) -> int: ...
+    async def get_coordination_snapshot(self, run_id: str) -> CoordinationSnapshot | None: ...
     async def claim_run(self, run_id: str, expected: Sequence[RunStatus]) -> RunRecord: ...
     async def complete_run(self, run_id: str, final_report: str) -> RunRecord: ...
+    async def replace_final_report(
+        self,
+        run_id: str,
+        final_report: str,
+        *,
+        previous_sha256: str,
+        new_sha256: str,
+        report_quality: str,
+    ) -> RunRecord: ...
     async def fail_run(self, run_id: str, error_message: str) -> RunRecord: ...
     async def interrupt_run(self, run_id: str, reason: str) -> RunRecord: ...
     async def mark_stale_running_interrupted(self) -> list[str]: ...
@@ -322,6 +339,189 @@ class PostgresRunRepository:
                 ON research_run_events (run_id, sequence)
                 """
             )
+            from ..coordination.schema import setup_coordination_schema
+
+            await setup_coordination_schema(conn)
+            await self._isolate_shared_budget_accounts(conn)
+
+    async def _isolate_shared_budget_accounts(self, conn) -> None:
+        """One-time, idempotent split of legacy shared accounts into per-Run ledgers."""
+        groups = await (
+            await conn.execute(
+                """
+                SELECT budget_id FROM research_runs
+                WHERE budget_id IS NOT NULL
+                GROUP BY budget_id HAVING COUNT(*) > 1
+                """
+            )
+        ).fetchall()
+        for group in groups:
+            old_budget_id = group["budget_id"]
+            async with conn.transaction():
+                account = await (
+                    await conn.execute(
+                        "SELECT budget FROM research_budget_accounts "
+                        "WHERE budget_id = %s FOR UPDATE",
+                        (old_budget_id,),
+                    )
+                ).fetchone()
+                runs = await (
+                    await conn.execute(
+                        """
+                        SELECT run_id, parent_run_id, model_usage, final_report, created_at
+                        FROM research_runs WHERE budget_id = %s
+                        ORDER BY created_at, run_id FOR UPDATE
+                        """,
+                        (old_budget_id,),
+                    )
+                ).fetchall()
+                if account is None or len(runs) < 2:
+                    continue
+                old = account["budget"]
+                run_ids = {run["run_id"] for run in runs}
+                owner_id = runs[0]["run_id"]
+                partitioned: dict[str, dict] = {run_id: {} for run_id in run_ids}
+                for reservation_id, raw in (old.get("reservations") or {}).items():
+                    entry = deepcopy(raw) if isinstance(raw, dict) else {}
+                    target = entry.get("run_id")
+                    if target not in run_ids:
+                        target = owner_id
+                        entry["run_id"] = target
+                    partitioned[target][reservation_id] = entry
+
+                increases = await (
+                    await conn.execute(
+                        """
+                        SELECT run_id, sequence, payload
+                        FROM research_run_events
+                        WHERE run_id = ANY(%s) AND event_type = 'budget_increased'
+                        ORDER BY sequence
+                        """,
+                        (list(run_ids),),
+                    )
+                ).fetchall()
+                first_expected = next(
+                    (
+                        int(event["payload"]["expected_tokens"])
+                        for event in increases
+                        if event["payload"].get("expected_tokens") is not None
+                    ),
+                    int((old.get("policy") or new_budget()["policy"])["tokens"]),
+                )
+                increases_by_run: dict[str, list[dict]] = {run_id: [] for run_id in run_ids}
+                for event in increases:
+                    increases_by_run[event["run_id"]].append(event["payload"])
+
+                retrieval_rows = await (
+                    await conn.execute(
+                        """
+                        SELECT run_id, COUNT(*) AS calls
+                        FROM research_retrieval_operations
+                        WHERE run_id = ANY(%s) GROUP BY run_id
+                        """,
+                        (list(run_ids),),
+                    )
+                ).fetchall()
+                retrieval_counts = {row["run_id"]: int(row["calls"]) for row in retrieval_rows}
+                budgets: dict[str, dict] = {}
+                for run in runs:
+                    run_id = run["run_id"]
+                    entries = partitioned[run_id]
+                    model_entries = [entry for entry in entries.values() if entry.get("kind") == "model"]
+                    retrieval_entries = [entry for entry in entries.values() if entry.get("kind") == "retrieval"]
+                    actual = sum(
+                        int(entry.get("actual_tokens") or 0)
+                        for entry in model_entries
+                        if entry.get("status") == "settled"
+                    )
+                    charged = sum(
+                        int(
+                            entry.get("actual_tokens")
+                            if entry.get("status") == "settled"
+                            and entry.get("actual_tokens") is not None
+                            else entry.get("reserved_tokens", 0)
+                        )
+                        for entry in model_entries
+                    )
+                    usage = run.get("model_usage") or {}
+                    known_tokens = max(actual, int(usage.get("tokens") or 0))
+                    charged += max(0, known_tokens - actual)
+                    policy = deepcopy(old.get("policy") or new_budget()["policy"])
+                    policy["tokens"] = first_expected
+                    for increase in increases_by_run[run_id]:
+                        policy["tokens"] = int(increase["new_tokens"])
+                    saved_increases = {
+                        key: deepcopy(value)
+                        for key, value in (old.get("increases") or {}).items()
+                        if (value.get("request") or {}).get("run_id") == run_id
+                    }
+                    exact_model_ledger = (
+                        len(model_entries) == int(usage.get("attempts") or 0)
+                        and actual == int(usage.get("tokens") or 0)
+                    )
+                    budgets[run_id] = {
+                        "version": 2,
+                        "policy": policy,
+                        "deadline": None,
+                        "model_calls": max(len(model_entries), int(usage.get("attempts") or 0)),
+                        "retrieval_calls": max(
+                            len(retrieval_entries), retrieval_counts.get(run_id, 0)
+                        ),
+                        "known_tokens": known_tokens,
+                        "charged_tokens": charged,
+                        "legacy_unknown_calls": max(
+                            sum(entry.get("status") != "settled" for entry in model_entries),
+                            int(usage.get("unknown") or 0),
+                        ),
+                        "legacy_history_incomplete": bool(
+                            not exact_model_ledger
+                            or (old.get("legacy_history_incomplete") and run.get("final_report") and not usage)
+                        ),
+                        "reservations": entries,
+                        "increases": saved_increases,
+                    }
+
+                # Preserve any unattributed legacy aggregate on the oldest Run only.
+                for field in ("model_calls", "retrieval_calls", "known_tokens", "charged_tokens"):
+                    remainder = max(
+                        0,
+                        int(old.get(field) or 0)
+                        - sum(int(budget[field]) for budget in budgets.values()),
+                    )
+                    budgets[owner_id][field] += remainder
+                    if remainder:
+                        budgets[owner_id]["legacy_history_incomplete"] = True
+
+                for run in runs:
+                    run_id = run["run_id"]
+                    new_budget_id = "budget_run_" + hashlib.sha256(run_id.encode()).hexdigest()[:32]
+                    await conn.execute(
+                        "INSERT INTO research_budget_accounts (budget_id, budget) VALUES (%s, %s) "
+                        "ON CONFLICT (budget_id) DO UPDATE SET budget = EXCLUDED.budget",
+                        (new_budget_id, Jsonb(budgets[run_id])),
+                    )
+                    await conn.execute(
+                        "UPDATE research_runs SET budget_id = %s, updated_at = NOW() WHERE run_id = %s",
+                        (new_budget_id, run_id),
+                    )
+                    await conn.execute(
+                        """
+                        INSERT INTO research_run_events (run_id, event_type, payload)
+                        VALUES (%s, 'budget_account_isolated', %s)
+                        """,
+                        (
+                            run_id,
+                            Jsonb(
+                                {
+                                    "run_id": run_id,
+                                    "previous_budget_id": old_budget_id,
+                                    "budget_id": new_budget_id,
+                                    "scope": "run",
+                                    "preserved_usage": budget_summary(budgets[run_id]),
+                                }
+                            ),
+                        ),
+                    )
 
     async def health_check(self) -> bool:
         pool = self._require_pool()
@@ -389,11 +589,12 @@ class PostgresRunRepository:
         try:
             async with pool.connection() as conn, conn.transaction():
                 budget_id = "budget_" + uuid4().hex
+                parent_workspace_summary = ""
                 if parent_run_id:
-                    parent = await (await conn.execute("SELECT budget_id,status FROM research_runs WHERE run_id=%s FOR UPDATE",
+                    parent = await (await conn.execute("SELECT status,sections FROM research_runs WHERE run_id=%s FOR UPDATE",
                                                       (parent_run_id,))).fetchone()
-                    if not parent or not parent["budget_id"]:
-                        raise RunConflictError("父研究预算需先显式迁移，子 Run 不会获得新额度")
+                    if not parent:
+                        raise RunNotFoundError(parent_run_id)
                     if parent_snapshot_cursor is not None:
                         cursor = await (await conn.execute("SELECT COALESCE(MAX(sequence),0) AS n FROM research_run_events WHERE run_id=%s",
                                                            (parent_run_id,))).fetchone()
@@ -410,10 +611,28 @@ class PostgresRunRepository:
                             """, (parent_run_id, operation.get("target"), str(parent_snapshot_cursor)))).fetchone()
                             if duplicate:
                                 raise RunConflictError(f"该快照已有选章继续任务 {duplicate['run_id']}，请打开该任务继续，避免重复消耗")
-                    budget_id = parent["budget_id"]
-                else:
-                    await conn.execute("INSERT INTO research_budget_accounts VALUES (%s, %s)",
-                                       (budget_id, Jsonb(new_budget())))
+                    workspace = await (
+                        await conn.execute(
+                            "SELECT summary FROM research_workspaces WHERE run_id = %s",
+                            (parent_run_id,),
+                        )
+                    ).fetchone()
+                    selected_ids = {
+                        item.section_id if hasattr(item, "section_id") else item.get("section_id")
+                        for item in (parent_context.handoff if parent_context else [])
+                    }
+                    all_ids = {
+                        item.get("section_id") for item in (parent.get("sections") or [])
+                    }
+                    parent_workspace_summary = (
+                        workspace["summary"]
+                        if workspace and selected_ids and selected_ids == all_ids
+                        else ""
+                    )
+                await conn.execute(
+                    "INSERT INTO research_budget_accounts VALUES (%s, %s)",
+                    (budget_id, Jsonb(new_budget())),
+                )
                 await (
                     await conn.execute(
                         """
@@ -437,6 +656,14 @@ class PostgresRunRepository:
                         ),
                     )
                 ).fetchone()
+                from ..coordination.repository import initialize_coordination_workspace
+
+                await initialize_coordination_workspace(
+                    conn,
+                    run_id,
+                    parent_context.model_dump(mode="json") if parent_context else None,
+                    parent_workspace_summary=parent_workspace_summary,
+                )
                 if session_id:
                     await conn.execute(
                         """
@@ -461,6 +688,30 @@ class PostgresRunRepository:
                 )
             ).fetchone()
         return RunRecord.model_validate(row) if row else None
+
+    async def get_run_usage(self, run_id: str) -> RunUsageSummary:
+        pool = self._require_pool()
+        async with pool.connection() as conn:
+            row = await (
+                await conn.execute(
+                    """
+                    SELECT r.run_id, r.budget_id, r.model_usage,
+                           CASE WHEN a.budget_id IS NULL THEN r.budget ELSE a.budget END AS budget
+                    FROM research_runs r
+                    LEFT JOIN research_budget_accounts a USING (budget_id)
+                    WHERE r.run_id = %s
+                    """,
+                    (run_id,),
+                )
+            ).fetchone()
+        if row is None:
+            raise RunNotFoundError(run_id)
+        return summarize_run_usage(
+            run_id=row["run_id"],
+            budget_id=row["budget_id"],
+            model_usage=row["model_usage"],
+            budget=row["budget"],
+        )
 
     async def get_snapshot(self, run_id: str) -> RunSnapshot:
         # One MVCC statement: never fetch the cursor after a separately-read stale state.
@@ -706,10 +957,8 @@ class PostgresRunRepository:
                     raise RunConflictError("仅明确的选章继续可复用父查询成果")
                 old = await (await conn.execute("""
                     SELECT o.data FROM research_retrieval_operations o
-                    JOIN research_runs p ON p.run_id=o.run_id
                     WHERE o.run_id=%s AND o.operation_id=%s
-                      AND p.budget_id=%s
-                """, (reuse_parent, operation_id, row["budget_id"]))).fetchone()
+                """, (reuse_parent, operation_id))).fetchone()
                 if old:
                     # Continue inherits failed attempts too: branching cannot reset
                     # the operation's lifetime cap. New explicit refresh is distinct.
@@ -814,7 +1063,7 @@ class PostgresRunRepository:
                     if row['status'] == 'running':
                         raise RunConflictError("请先暂停当前 Run，再追加预算")
                     if budget['policy']['tokens'] != request.expected_tokens:
-                        raise RunConflictError("共享额度已变化，请刷新后重新确认")
+                        raise RunConflictError("当前 Run 的独立额度已变化，请刷新后重新确认")
                     at = await (await conn.execute("SELECT NOW() AS at")).fetchone()
                     history[request.request_id] = {'request': fingerprint, 'at': at['at'].isoformat()}
                     budget['policy']['tokens'] = request.new_tokens
@@ -827,7 +1076,7 @@ class PostgresRunRepository:
                         (run_id, 'budget_increased', Jsonb({**fingerprint, 'budget_id': row['budget_id'],
                          'delta_tokens': request.new_tokens - request.expected_tokens,
                          'previous_status': row['status'], 'execution_id': row['execution_id'],
-                         'budget': budget_summary(budget), 'message': '共享 Token 额度已追加，消耗保留，未启动执行'})))
+                         'budget': budget_summary(budget), 'message': '当前 Run 的独立 Token 额度已追加，消耗保留，未启动执行'})))
         return await self.get_run(run_id)
 
     async def save_sections(self, run_id: str, sections: list[dict]) -> None:
@@ -835,11 +1084,23 @@ class PostgresRunRepository:
         from ..sections.models import SectionRecord
 
         normalized = [SectionRecord.model_validate(s).model_dump(mode="json") for s in sections]
-        async with self._require_pool().connection() as conn:
+        async with self._require_pool().connection() as conn, conn.transaction():
             cursor = await conn.execute(
                 "UPDATE research_runs SET sections = %s, updated_at = NOW() WHERE run_id = %s",
                 (Jsonb(normalized), run_id),
             )
+            if cursor.rowcount == 1:
+                row = await (
+                    await conn.execute(
+                        "SELECT parent_context FROM research_runs WHERE run_id = %s",
+                        (run_id,),
+                    )
+                ).fetchone()
+                from ..coordination.repository import sync_section_artifacts
+
+                await sync_section_artifacts(
+                    conn, run_id, normalized, row["parent_context"]
+                )
         if cursor.rowcount != 1:
             raise RunNotFoundError(run_id)
 
@@ -854,6 +1115,27 @@ class PostgresRunRepository:
             )
         if cursor.rowcount != 1:
             raise RunNotFoundError(run_id)
+
+    async def save_coordination_unit(
+        self,
+        unit: CoordinationUnitWrite | dict,
+    ) -> int:
+        """Atomically replace one parent/section unit using workspace CAS."""
+        from ..coordination.repository import replace_coordination_unit
+
+        normalized = CoordinationUnitWrite.model_validate(unit)
+        async with self._require_pool().connection() as conn, conn.transaction():
+            return await replace_coordination_unit(conn, normalized)
+
+    async def get_coordination_snapshot(
+        self,
+        run_id: str,
+    ) -> CoordinationSnapshot | None:
+        """Return the read-only logical table consumed by coordination Agents."""
+        from ..coordination.repository import load_coordination_snapshot
+
+        async with self._require_pool().connection() as conn:
+            return await load_coordination_snapshot(conn, run_id)
 
     async def claim_run(self, run_id: str, expected: Sequence[RunStatus], *, event_type: str | None = None) -> RunRecord:
         pool = self._require_pool()
@@ -927,6 +1209,17 @@ class PostgresRunRepository:
             sections = [SectionRecord.model_validate(s).model_dump(mode="json") for s in payload["sections"]]
             await conn.execute("UPDATE research_runs SET sections = %s, updated_at = NOW() WHERE run_id = %s",
                                (Jsonb(sections), run_id))
+            row = await (
+                await conn.execute(
+                    "SELECT parent_context FROM research_runs WHERE run_id = %s",
+                    (run_id,),
+                )
+            ).fetchone()
+            from ..coordination.repository import sync_section_artifacts
+
+            await sync_section_artifacts(
+                conn, run_id, sections, row["parent_context"] if row else None
+            )
         if "report_review" in payload:
             review = ReportReview.model_validate(payload["report_review"]).model_dump(mode="json") if payload["report_review"] else None
             await conn.execute("UPDATE research_runs SET report_review = %s, updated_at = NOW() WHERE run_id = %s",
@@ -1027,6 +1320,14 @@ class PostgresRunRepository:
                         payload,
                     )
                     await self._apply_artifacts(conn, run_id, payload)
+                    if status == RunStatus.COMPLETED:
+                        from ..coordination.repository import finalize_coordination_workspace
+
+                        await finalize_coordination_workspace(
+                            conn,
+                            run_id,
+                            report_quality=str(payload.get("report_quality", "reviewed")),
+                        )
                     row = await (await conn.execute("SELECT * FROM research_runs WHERE run_id = %s", (run_id,))).fetchone()
                     row["budget"] = await self._account_budget(conn, row)
                     event_payload = {**payload, "run_id": run_id, "execution_id": execution_id,
@@ -1053,6 +1354,65 @@ class PostgresRunRepository:
             error_message=None,
         )
 
+    async def replace_final_report(
+        self,
+        run_id: str,
+        final_report: str,
+        *,
+        previous_sha256: str,
+        new_sha256: str,
+        report_quality: str,
+    ) -> RunRecord:
+        """Replace only a completed Run's presentation artifact, atomically and idempotently."""
+        pool = self._require_pool()
+        async with pool.connection() as conn, conn.transaction():
+            current = await (
+                await conn.execute(
+                    "SELECT status, final_report, execution_id, session_id "
+                    "FROM research_runs WHERE run_id = %s FOR UPDATE",
+                    (run_id,),
+                )
+            ).fetchone()
+            if current is None:
+                raise RunNotFoundError(run_id)
+            if current["status"] != RunStatus.COMPLETED.value:
+                raise RunConflictError("only a completed run can be reassembled")
+            if current["final_report"] != final_report:
+                await conn.execute(
+                    "UPDATE research_runs SET final_report = %s, updated_at = NOW() "
+                    "WHERE run_id = %s",
+                    (final_report, run_id),
+                )
+                await conn.execute(
+                    """
+                    INSERT INTO research_run_events (run_id, event_type, payload)
+                    VALUES (%s, 'report_reassembled', %s)
+                    """,
+                    (
+                        run_id,
+                        Jsonb(
+                            {
+                                "run_id": run_id,
+                                "execution_id": current["execution_id"],
+                                "previous_sha256": previous_sha256,
+                                "new_sha256": new_sha256,
+                                "report_quality": report_quality,
+                                "model_calls": 0,
+                                "retrieval_calls": 0,
+                            }
+                        ),
+                    ),
+                )
+                if current.get("session_id"):
+                    await conn.execute(
+                        "UPDATE research_sessions SET updated_at = NOW() WHERE session_id = %s",
+                        (current["session_id"],),
+                    )
+        updated = await self.get_run(run_id)
+        if updated is None:  # pragma: no cover - protected by the row lock above
+            raise RunNotFoundError(run_id)
+        return updated
+
     async def fail_run(self, run_id: str, error_message: str) -> RunRecord:
         return await self._finish_run(
             run_id,
@@ -1063,7 +1423,7 @@ class PostgresRunRepository:
 
     async def interrupt_run(self, run_id: str, reason: str) -> RunRecord:
         pool = self._require_pool()
-        async with pool.connection() as conn:
+        async with pool.connection() as conn, conn.transaction():
             row = await (
                 await conn.execute(
                     """
@@ -1114,6 +1474,10 @@ class PostgresRunRepository:
                     ),
                 )
             ).fetchone()
+            if row and status == RunStatus.COMPLETED:
+                from ..coordination.repository import finalize_coordination_workspace
+
+                await finalize_coordination_workspace(conn, run_id)
             if row and row.get("session_id"):
                 await conn.execute(
                     """

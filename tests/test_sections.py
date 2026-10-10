@@ -9,6 +9,7 @@ from multi_agent_research.core.state import initial_state
 from multi_agent_research.agents import AgentTurnLimitError
 from multi_agent_research.sections import workflow
 from multi_agent_research.sections.models import (
+    ChiefEditorResult,
     ClaimExtraction,
     ReportReview,
     SectionPlan,
@@ -43,6 +44,42 @@ class FakeModels:
 
     async def raw_model(self, system, prompt, schema=None):
         cost = {"tokens": 10, "unknown": 0}
+        if schema is ChiefEditorResult:
+            self.calls["chief_edit"] += 1
+            payload = __import__("json").loads(prompt)
+            chapters = payload["chapters"]
+            review = payload["report_review"]
+            claims = [
+                claim["claim_id"]
+                for chapter in chapters
+                for claim in chapter["claims"]
+            ]
+            return ChiefEditorResult(
+                verdict="ready" if review["verdict"] == "pass" else "limited",
+                report_title="研究报告：分析公司X竞争优势",
+                executive_summary="以下报告综合分析公司X的竞争优势。",
+                sections=[
+                    {
+                        "title": chapter["title"],
+                        "body": chapter["draft"],
+                        "source_section_ids": [chapter["section_id"]],
+                        "claim_ids": [claim["claim_id"] for claim in chapter["claims"]],
+                    }
+                    for chapter in chapters
+                ],
+                conclusion="现有证据构成了对研究问题的分层回答。",
+                issue_resolutions=[
+                    {
+                        "issue_index": index,
+                        "action": "preserved_as_limitation",
+                        "explanation": issue["detail"],
+                        "section_ids": issue["section_ids"],
+                    }
+                    for index, issue in enumerate(review["issues"])
+                ],
+                used_claim_ids=claims,
+                unresolved_issues=[issue["detail"] for issue in review["issues"]],
+            ), cost
         if schema is ReportReview:
             self.calls["report_review"] += 1
             return ReportReview(verdict="pass", summary="全篇口径一致"), cost
@@ -118,8 +155,8 @@ async def test_serial_chapters_scoped_search_and_dependent_synthesis(monkeypatch
     assert all(s["revision"] == 1 for s in result["sections"])
     assert "成本的分析结论[来源1]" in result["final_report"]
     assert "渠道的分析结论[来源2]" in result["final_report"]
-    assert result["model_calls"] == 14  # planner + four operations per chapter + final review
-    assert result["token_budget_used"] == 140
+    assert result["model_calls"] == 16  # chapter pipeline + pre-review + edit + post-review
+    assert result["token_budget_used"] == 160
 
 
 @pytest.mark.asyncio
@@ -173,7 +210,8 @@ async def test_review_supplements_only_its_chapter_with_bounded_revisions(monkey
     assert first["status"] == "limited"
     assert second["status"] == "complete"
     assert second["search_rounds"] == 1
-    assert "未解决" in result["final_report"]
+    assert "阅读提示" in result["final_report"]
+    assert "本章局限" not in result["final_report"]
     assert result["report_quality"] == "limited"
 
 
@@ -268,10 +306,57 @@ def test_assembly_preserves_paragraphs_and_renumbers_shared_evidence():
     )
     report = assemble_report("研究问题", [first, second])
     assert "乙[来源2]；再看甲[来源1]" in report
-    assert report.count("chunk_id: A::2") == 1
+    assert "chunk_id" not in report
+    assert report.count("A | p.2") == 1
     assert "p.2" in report
     assert len(merge_results([a], [a, b])) == 2
     assert len(merge_results([a], [{**a, "content": "更新的正文"}])) == 2
+
+
+def test_public_report_omits_internal_review_and_section_limitations():
+    source = evidence("industry/source/path/行业年报")
+    source["metadata"]["url"] = "https://example.com/report"
+    section = SectionRecord(
+        section_id="section_1",
+        title="需求变化",
+        question="需求发生了什么变化",
+        draft="需求结构正在改变，但结论受样本范围限制[来源1]。",
+        sources=[source],
+        status="limited",
+        limitations=[
+            "section_1:v2:c3 结论关联修复预算已用完",
+            "章节审校仍有未解决问题：内部调试细节",
+        ],
+    )
+    report = assemble_report("行业变化", [section], limited=True)
+    assert "需求结构正在改变" in report
+    assert "阅读提示" in report
+    assert "本章局限" not in report
+    assert "section_1:v2:c3" not in report
+    assert "内部调试细节" not in report
+    assert "chunk_id" not in report
+    assert "行业年报 | p.2 | <https://example.com/report>" in report
+
+
+def test_public_references_merge_multiple_excerpts_from_the_same_document():
+    first_source = evidence("同一报告")
+    second_source = evidence("同一报告")
+    second_source["content"] = "另一页证据"
+    second_source["metadata"]["page"] = 9
+    second_source["metadata"]["chunk_id"] = "同一报告::9"
+    section = SectionRecord(
+        section_id="section_1",
+        title="变化",
+        question="发生什么变化",
+        draft="结论甲[来源1]，结论乙[来源2]。",
+        sources=[first_source, second_source],
+        status="complete",
+    )
+    report = assemble_report("行业变化", [section])
+    assert "结论甲[来源1]，结论乙[来源1]" in report
+    assert report.count("[来源1] 同一报告") == 1
+    assert "p.2, p.9" in report
+    assert "[来源2]" not in report
 
 
 def test_plan_rejects_synthesis_before_required_research():
@@ -300,5 +385,7 @@ async def test_new_stream_publishes_sections_and_final_snapshot(monkeypatch):
     )
     assert [kind for kind, _ in events][-2:] == ["report_ready", "done"]
     assert events[-1][1]["report_quality"] == "reviewed"
-    assert events[-1][1]["total_results"] == 4  # two local + two synthesis observations
+    # Section 2 receives the accepted source from section 1, and synthesis
+    # receives both completed sections: 1 + 2 + 2 traceable evidence records.
+    assert events[-1][1]["total_results"] == 5
     assert all(kind != "supervisor_decision" for kind, _ in events)

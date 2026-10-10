@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, NotRequired, Protocol, TypedDict
 
-from ..sections.models import SectionRecord, SectionReview
+from ..sections.models import ReportReview, SectionRecord, SectionReview
 
 
 class ModelCost(TypedDict):
@@ -17,7 +17,7 @@ class ModelCost(TypedDict):
 
 
 class ModelCall(Protocol):
-    """Temporary gateway contract while model ownership moves out of the workflow."""
+    """Checked model gateway supplied by the Agent runtime composition root."""
 
     def __call__(
         self,
@@ -108,3 +108,17 @@ class ReportReviewRequest:
 
     research_question: str
     sections: tuple[SectionRecord, ...]
+    candidate_report: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class ChiefEditorRequest:
+    """Bounded, evidence-addressed inputs for whole-report semantic editing."""
+
+    research_question: str
+    sections: tuple[SectionRecord, ...]
+    report_review: ReportReview
+    coordination_context: str
+    stable_sections: tuple[dict[str, Any], ...]
+    evidence_ids: frozenset[str]
+    previous_candidate: dict[str, Any] | None = None

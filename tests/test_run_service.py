@@ -23,6 +23,7 @@ from multi_agent_research.runs.models import (
 )
 from multi_agent_research.runs.repository import RunConflictError, StaleExecutionError
 from multi_agent_research.runs.service import RunService
+from multi_agent_research.runs.usage import summarize_run_usage
 from multi_agent_research.core.budget import (new_budget, start_budget, reserve, settle, budget_summary,
                                             migrate_budget, ExecutionPaused)
 
@@ -145,19 +146,25 @@ class MemoryRunStore:
             question=question,
             status=RunStatus.CREATED,
             budget=new_budget(),
-            budget_id=self.runs[parent_run_id].budget_id if parent_run_id else "budget_" + run_id,
+            budget_id="budget_" + run_id,
             parent_context=parent_context,
             created_at=now,
             updated_at=now,
         )
         self.runs[run_id] = record
-        if parent_run_id:
-            record.budget = deepcopy(self.runs[parent_run_id].budget)
-            record.budget["deadline"] = None
         return record
 
     async def get_run(self, run_id: str) -> RunRecord | None:
         return self.runs.get(run_id)
+
+    async def get_run_usage(self, run_id):
+        record = self.runs[run_id]
+        return summarize_run_usage(
+            run_id=run_id,
+            budget_id=record.budget_id,
+            model_usage=record.model_usage,
+            budget=record.budget,
+        )
 
     async def get_snapshot(self, run_id: str) -> RunSnapshot:
         return RunSnapshot(run=self.runs[run_id].model_copy(deep=True),
@@ -408,6 +415,31 @@ class MemoryRunStore:
             update={"status": RunStatus.COMPLETED, "final_report": final_report}
         )
         self.runs[run_id] = updated
+        return updated
+
+    async def replace_final_report(
+        self,
+        run_id: str,
+        final_report: str,
+        *,
+        previous_sha256: str,
+        new_sha256: str,
+        report_quality: str,
+    ) -> RunRecord:
+        current = self.runs[run_id]
+        if current.status != RunStatus.COMPLETED:
+            raise RunConflictError("only a completed run can be reassembled")
+        if current.final_report == final_report:
+            return current
+        updated = current.model_copy(update={"final_report": final_report})
+        self.runs[run_id] = updated
+        await self.append_event(run_id, "report_reassembled", {
+            "previous_sha256": previous_sha256,
+            "new_sha256": new_sha256,
+            "report_quality": report_quality,
+            "model_calls": 0,
+            "retrieval_calls": 0,
+        })
         return updated
 
     async def fail_run(self, run_id: str, error_message: str) -> RunRecord:

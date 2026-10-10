@@ -58,6 +58,21 @@ def evidence_key(result: dict) -> str:
     return hashlib.sha256(json.dumps(identity, ensure_ascii=False).encode()).hexdigest()
 
 
+def document_key(result: dict) -> str:
+    """Identify a public reference document while keeping excerpt identity separate."""
+    meta = result.get("metadata") or {}
+    identity = (
+        ("url", meta["url"])
+        if meta.get("url")
+        else ("source", meta["source"])
+        if meta.get("source")
+        else ("title", meta["title"])
+        if meta.get("title")
+        else ("evidence", evidence_key(result))
+    )
+    return hashlib.sha256(json.dumps(identity, ensure_ascii=False).encode()).hexdigest()
+
+
 def merge_results(existing: list[dict], incoming: list[dict]) -> list[dict]:
     merged = {evidence_key(item): item for item in existing}
     for item in incoming:
@@ -76,11 +91,26 @@ def citation_issues(draft: str, sources: list[dict]) -> list[str]:
     return issues
 
 
-def assemble_report(question: str, sections: list[SectionRecord]) -> str:
-    """Keep approved chapter text; renumber only citations and generate exact locators."""
+def assemble_report(
+    question: str,
+    sections: list[SectionRecord],
+    *,
+    limited: bool | None = None,
+) -> str:
+    """Build the consumer report without leaking internal review artifacts."""
     references: list[dict] = []
     registry: dict[str, int] = {}
     parts = [f"# 研究报告：{question}"]
+    is_limited = (
+        any(section.status == "limited" for section in sections)
+        if limited is None
+        else limited
+    )
+    if is_limited:
+        parts.append(
+            "> 阅读提示：部分结论的证据强度有限。正文已保留适用范围、"
+            "时效和不确定性说明，建议结合参考来源审慎使用。"
+        )
     for section in sections:
         if section.status not in {"complete", "limited"}:
             raise ValueError(f"section {section.section_id} is unfinished")
@@ -90,28 +120,30 @@ def assemble_report(question: str, sections: list[SectionRecord]) -> str:
 
         def replace(match: re.Match) -> str:
             source = section.sources[int(match.group(1)) - 1]
-            key = evidence_key(source)
+            key = document_key(source)
             if key not in registry:
-                references.append(source)
+                references.append({"source": source, "pages": set()})
                 registry[key] = len(references)
+            page = (source.get("metadata") or {}).get("page")
+            if isinstance(page, int) and page >= 1:
+                references[registry[key] - 1]["pages"].add(page)
             return f"[来源{registry[key]}]"
 
         body = CITATION.sub(replace, section.draft)
-        notice = ""
-        if section.status == "limited":
-            notice = "> 本章存在未解决的证据或审校缺口，以下内容需结合局限阅读。\n\n"
-        parts.append(f"## {section.title}\n\n{notice}{body}")
-        if section.limitations:
-            parts.append("本章局限：\n" + "\n".join(f"- {x}" for x in section.limitations))
+        parts.append(f"## {section.title}\n\n{body}")
     lines = ["## 参考来源"]
-    for index, source in enumerate(references, 1):
+    for index, reference in enumerate(references, 1):
+        source = reference["source"]
         meta = source.get("metadata") or {}
-        locator = meta.get("source") or meta.get("title") or "来源名称未提供"
-        page = meta.get("page")
-        if isinstance(page, int) and page >= 1:
-            locator += f" | p.{page}"
-        if meta.get("chunk_id"):
-            locator += f" | chunk_id: {meta['chunk_id']}"
+        locator = (
+            meta.get("title")
+            or extract_doc_title(source)
+            or meta.get("publisher")
+            or "来源名称未提供"
+        )
+        pages = sorted(reference["pages"])
+        if pages:
+            locator += " | " + ", ".join(f"p.{page}" for page in pages)
         if meta.get("url"):
             locator += f" | <{meta['url']}>"
         lines.append(f"[来源{index}] {locator}")

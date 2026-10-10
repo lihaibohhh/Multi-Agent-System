@@ -142,7 +142,7 @@ async def test_workflow_runs_report_reviewer_with_run_context(monkeypatch) -> No
         config={"configurable": {"thread_id": "run-workflow-report-review"}},
     )
 
-    assert result["section_step"] == "assemble"
+    assert result["section_step"] == "chief_edit"
     assert result["report_review"]["verdict"] == "pass"
     assert result["token_budget_used"] == 23
     assert result["model_calls"] == 1

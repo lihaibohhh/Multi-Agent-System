@@ -75,6 +75,40 @@ class ReportReview(BaseModel):
     summary: str = Field(default="", max_length=2000)
 
 
+class EditorialIssueResolution(BaseModel):
+    """How the editor handled one issue from the independent report review."""
+
+    issue_index: int = Field(ge=0)
+    action: Literal["resolved_by_edit", "preserved_as_limitation"]
+    explanation: str = Field(min_length=1, max_length=1000)
+    section_ids: list[str] = Field(default_factory=list, max_length=4)
+
+
+class EditedReportSection(BaseModel):
+    """One reader-facing section with stable evidence tokens and provenance."""
+
+    title: str = Field(min_length=1, max_length=120)
+    body: str = Field(min_length=1, max_length=8000)
+    source_section_ids: list[str] = Field(min_length=1, max_length=4)
+    claim_ids: list[str] = Field(default_factory=list, max_length=48)
+
+
+class ChiefEditorResult(BaseModel):
+    """Structured whole-report edit produced from already reviewed chapters."""
+
+    verdict: Literal["ready", "limited"]
+    report_title: str = Field(min_length=1, max_length=180)
+    executive_summary: str = Field(min_length=1, max_length=3000)
+    sections: list[EditedReportSection] = Field(min_length=1, max_length=8)
+    conclusion: str = Field(min_length=1, max_length=3000)
+    issue_resolutions: list[EditorialIssueResolution] = Field(
+        default_factory=list,
+        max_length=12,
+    )
+    used_claim_ids: list[str] = Field(default_factory=list, max_length=96)
+    unresolved_issues: list[str] = Field(default_factory=list, max_length=12)
+
+
 class SectionDraft(BaseModel):
     revision: int
     draft: str

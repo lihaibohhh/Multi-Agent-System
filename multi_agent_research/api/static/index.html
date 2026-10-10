@@ -78,9 +78,28 @@
             <button class="btn btn-warning hidden" id="resume-btn">↻ 从 Checkpoint 恢复</button>
             <button class="btn btn-warning hidden" id="pause-btn">暂停研究</button>
             <button class="btn btn-warning hidden" id="migrate-budget-btn">确认迁移旧预算策略</button>
-            <button class="btn btn-warning hidden" id="increase-budget-btn">追加共享 Token 额度</button>
+            <button class="btn btn-warning hidden" id="increase-budget-btn">追加当前 Run Token 额度</button>
           </div>
           <p id="run-budget" class="muted" aria-live="polite"></p>
+          <section class="usage-panel hidden" id="usage-panel" aria-live="polite">
+            <div class="usage-comparison">
+              <article class="usage-scope">
+                <span>当前 Run 增量</span>
+                <strong id="usage-current-tokens">0 Token</strong>
+                <small id="usage-current-calls">模型 0 次 · 检索 0 次</small>
+              </article>
+              <article class="usage-scope budget-account">
+                <span>当前 Run 预算占用</span>
+                <strong id="usage-budget-tokens">0 Token</strong>
+                <small id="usage-budget-calls">模型 0 次 · 检索 0 次</small>
+              </article>
+            </div>
+            <p class="usage-note" id="usage-note"></p>
+            <details class="usage-details">
+              <summary>按 Agent / 阶段查看当前 Run 消耗</summary>
+              <div class="usage-stage-list" id="usage-stage-list"></div>
+            </details>
+          </section>
           <div class="notice" id="notice"></div>
         </div></section>
 
@@ -128,6 +147,7 @@
           </div>
           <div class="report-actions">
             <button class="btn btn-ghost hidden" id="use-as-parent-btn">基于此继续</button>
+            <button class="btn btn-ghost hidden" id="reassemble-btn">重新整理报告</button>
             <button class="btn btn-ghost hidden" id="copy-btn">复制</button>
           </div>
         </div>
@@ -136,14 +156,20 @@
           <div class="stat">章节证据条目（含复用）<strong id="stat-results">—</strong></div>
           <div class="stat">实际引用<strong id="stat-citations">—</strong></div>
           <div class="stat">报告字数<strong id="stat-chars">—</strong></div>
-          <div class="stat">已报告 Token<strong id="stat-tokens">—</strong></div>
+          <div class="stat">当前 Run Token<strong id="stat-tokens">—</strong></div>
         </div>
-        <div class="card-body hidden" id="report-review"></div>
-        <div class="card-body hidden" id="sections-panel">
-          <h3>章节进度与草稿</h3>
-          <p class="hint">来源编号为本章编号。结论关联可定位摘录，支持关系仍是模型判断。完成后可创建章节修订 Run，原报告不变。</p>
-          <div id="sections-list"></div>
-        </div>
+        <details class="internal-audit hidden" id="internal-audit">
+          <summary>
+            <span>内部质量审计</span>
+            <small>章节草稿、Claim、候选证据与审校问题；不属于正式报告正文</small>
+          </summary>
+          <div class="card-body hidden" id="report-review"></div>
+          <div class="card-body hidden" id="sections-panel">
+            <h3>章节进度与内部产物</h3>
+            <p class="hint">本区域用于研究过程核验。来源编号为本章编号；结论支持关系仍是模型判断。完成后可创建章节修订 Run，原报告不变。</p>
+            <div id="sections-list"></div>
+          </div>
+        </details>
         <div class="report-placeholder" id="report-empty"><div>
           <div class="report-placeholder-icon">◇</div>
           <h3>尚无报告</h3>

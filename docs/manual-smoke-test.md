@@ -44,10 +44,11 @@ Invoke-RestMethod http://127.0.0.1:8000/api/health
 
 - 任务可以创建并启动，SSE 持续显示进度，刷新页面后仍能恢复当前 Run。
 - 执行角色只体现 Planner、EvidenceResearch、SectionWriter、SectionReviewer、
-  ReportReviewer；Claim 绑定体现为 Processor，不出现旧 Supervisor、SearchAgent、
-  EvidenceAnalyst 或 ClaimExtractor 链路。
+  ReportReviewer、ChiefEditor；Claim 绑定体现为 Processor，不出现旧 Supervisor、
+  SearchAgent、EvidenceAnalyst 或 ClaimExtractor 链路。
 - 每一章按“研究、写作、审校、Claim 绑定”推进，完成后再进入下一章。
-- 最终报告能装配完成，章节引用编号有效，来源卡片和限制项可见。
+- 全章初审后进入 ChiefEditor 跨章编辑，再由 ReportReviewer 做编辑后复审；最终报告
+  能装配完成，章节引用编号有效，来源卡片和限制项可见。
 - Agent Trace 只显示安全元数据，不泄露 Prompt、检索正文或本地 Checkpoint 内容。
 
 ## 4. 暂停与恢复

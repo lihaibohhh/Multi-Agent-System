@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 from collections.abc import AsyncGenerator
 from datetime import datetime, timezone
@@ -11,9 +12,11 @@ from ..agents.context import agent_checkpoint_loader
 from ..agents.events import agent_event_sink
 from ..core.run_context import normalize_run_id, normalize_session_id
 from ..core.execution_fence import execution_fence
+from ..coordination.runtime import coordination_snapshot_loader
 from ..core.streaming import aresume_research, astream_research
-from ..sections.artifacts import parent_handoff, revision_sections
+from ..sections.artifacts import dependency_issues, parent_handoff, revision_sections
 from ..sections.model_output import attempt_sink
+from ..sections.rendering import assemble_report
 from .models import (
     AgentExecutionRecord,
     AgentLifecycleEventRecord,
@@ -21,6 +24,7 @@ from .models import (
     ParentContextSnapshot,
     RunEventRecord,
     RunRecord,
+    RunUsageSummary,
     RunStatus,
     SessionRecord,
     SessionTimeline,
@@ -279,8 +283,6 @@ class RunService:
             if parent.status not in {RunStatus.COMPLETED, RunStatus.PAUSED, RunStatus.FAILED,
                                      RunStatus.INTERRUPTED, RunStatus.BUDGET_LIMITED}:
                 raise RunConflictError("请先等待任务停止；不允许从执行中的章节创建局部操作")
-            if not parent.budget_id or parent.budget.get("version") != 2:
-                raise RunConflictError("请先显式迁移父研究预算；局部操作不会获得新额度")
             if not parent.session_id:
                 raise RunConflictError("父研究缺少 Session")
             # A failed projection write can lag behind the graph checkpoint.
@@ -327,6 +329,36 @@ class RunService:
 
     async def get_snapshot(self, run_id: str):
         return await self._repository.get_snapshot(run_id)
+
+    async def get_run_usage(self, run_id: str) -> RunUsageSummary:
+        await self.get_run(run_id)
+        return await self._repository.get_run_usage(run_id)
+
+    async def reassemble_report(self, run_id: str) -> RunRecord:
+        """Rebuild the public report from persisted, reviewed artifacts without AI calls."""
+        run = await self.get_run(run_id)
+        if run.status != RunStatus.COMPLETED:
+            raise RunConflictError("only a completed run can be reassembled")
+        if not run.sections or run.report_review is None:
+            raise RunConflictError("run has no reviewed section artifacts to reassemble")
+        if any(section.status not in {"complete", "limited"} for section in run.sections):
+            raise RunConflictError("run contains unfinished sections")
+        if dependency_issues(run.sections):
+            raise RunConflictError("run contains stale section dependencies")
+
+        limited = (
+            any(section.status == "limited" for section in run.sections)
+            or run.report_review.verdict != "pass"
+        )
+        report = assemble_report(run.question, run.sections, limited=limited)
+        previous = run.final_report or ""
+        return await self._repository.replace_final_report(
+            run_id,
+            report,
+            previous_sha256=hashlib.sha256(previous.encode("utf-8")).hexdigest(),
+            new_sha256=hashlib.sha256(report.encode("utf-8")).hexdigest(),
+            report_quality="limited" if limited else "reviewed",
+        )
 
     async def list_agent_executions(self, run_id: str) -> list[AgentExecutionRecord]:
         await self.get_run(run_id)
@@ -472,6 +504,13 @@ class RunService:
         agent_event_token = agent_event_sink.set(save_agent_event)
         checkpoint_loader_token = agent_checkpoint_loader.set(load_agent_checkpoint)
         fence_token = execution_fence.set((self._repository, run_id, record.execution_id))
+        async def load_coordination_snapshot():
+            method = getattr(self._repository, "get_coordination_snapshot", None)
+            return await method(run_id) if method is not None else None
+
+        coordination_token = coordination_snapshot_loader.set(
+            load_coordination_snapshot
+        )
         budget_token = None
         try:
             budget_token = current_budget.set(RunBudget(self._repository, record, self._search_slots))
@@ -527,6 +566,7 @@ class RunService:
             agent_checkpoint_loader.reset(checkpoint_loader_token)
             attempt_sink.reset(audit_token)
             execution_fence.reset(fence_token)
+            coordination_snapshot_loader.reset(coordination_token)
 
     async def _run_graph(self, record, *, resume):
         run_id = record.run_id

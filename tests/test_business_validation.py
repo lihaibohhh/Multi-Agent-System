@@ -15,7 +15,14 @@ from multi_agent_research.runs.service import RunService
 from multi_agent_research.sections import workflow
 from multi_agent_research.sections.artifacts import bind_claims
 from multi_agent_research.sections.model_output import ModelOutputError, invoke_checked
-from multi_agent_research.sections.models import ClaimExtraction, QuoteSpan, ReportReview, SectionPlan, SectionReview
+from multi_agent_research.sections.models import (
+    ChiefEditorResult,
+    ClaimExtraction,
+    QuoteSpan,
+    ReportReview,
+    SectionPlan,
+    SectionReview,
+)
 from multi_agent_research.sections.quotes import locate_quote
 from multi_agent_research.sections.validation import (
     BusinessValidationError, ValidationIssue, validate_draft, validate_plan,
@@ -226,7 +233,14 @@ async def test_full_graph_schema_parser_business_audit_failure_restart_and_assem
     async def handler(request):
         payload = json.loads(request.content)
         system, prompt = payload["messages"][0]["content"], payload["messages"][1]["content"]
-        schema = next((s for s in (ClaimRepairs, ClaimExtraction, SectionPlan, SectionReview, ReportReview)
+        schema = next((s for s in (
+            ClaimRepairs,
+            ClaimExtraction,
+            SectionPlan,
+            SectionReview,
+            ReportReview,
+            ChiefEditorResult,
+        )
                        if f'"title": "{s.__name__}"' in system), None)
         if schema is ClaimRepairs:
             repairs.append(prompt)

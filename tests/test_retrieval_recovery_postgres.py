@@ -93,18 +93,23 @@ async def test_atomic_receipts_replay_rollback_restart_and_fencing():
                 await repo.create_run(run_id="duplicate", session_id=None, parent_run_id="r", parent_context=context,
                                       question="continue", parent_snapshot_cursor=source.cursor)
             assert await repo.get_run("duplicate") is None
-            assert child.budget_id == new.budget_id
-            assert child.budget["known_tokens"] == 50 and child.budget["charged_tokens"] == 70
+            assert child.budget_id != new.budget_id
+            assert child.budget["known_tokens"] == 0 and child.budget["charged_tokens"] == 0
+            assert child.budget["reservations"] == {}
             assert (await repo.get_run("child")).parent_context.section_operation["mode"] == "continue"
             child = await repo.begin_execution("child", (RunStatus.CREATED,), resume=False)
             copied, cached = await repo.begin_retrieval("child", child.execution_id, key, DESCRIPTOR, "unused-child", "r")
             assert cached and copied["results"] == []
-            assert (await repo.get_run("child")).budget["retrieval_calls"] == 1
+            # Replaying a completed parent receipt performs no external call and
+            # therefore does not consume the child's independent retrieval quota.
+            assert (await repo.get_run("child")).budget["retrieval_calls"] == 0
             assert "unused-child" not in (await repo.get_run("child")).budget["reservations"]
             await repo.reserve_budget("child", child.execution_id, "child-model", "model", 20, "write")
             await repo.settle_budget("child", child.execution_id, "child-model", 10)
-            assert (await repo.get_run("r")).budget["known_tokens"] == 60
-            assert (await repo.get_run("r")).budget["charged_tokens"] == 80
+            assert (await repo.get_run("child")).budget["known_tokens"] == 10
+            assert (await repo.get_run("child")).budget["charged_tokens"] == 10
+            assert (await repo.get_run("r")).budget["known_tokens"] == 50
+            assert (await repo.get_run("r")).budget["charged_tokens"] == 70
             assert (await repo.get_run("r")).budget["reservations"]["unknown-model"]["status"] == "unknown"
             exhausted = {**copied, "descriptor": other, "status": "retryable_failed",
                          "attempts": [{"execution_id": "old", "status": "retryable_failed"}] * 4}

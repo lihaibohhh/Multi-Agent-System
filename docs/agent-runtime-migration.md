@@ -5,7 +5,7 @@
 
 ## 当前基线
 
-当前系统使用 `workflow_version=5`，由父图和串行章节子图共同执行：
+当前系统使用 `workflow_version=6`，由父图和串行章节子图共同执行：
 
 ```text
 plan_sections
@@ -16,16 +16,19 @@ plan_sections
      -> section_claims / section_claim_gate
      -> section_advance
   -> report_review
+  -> chief_edit
+  -> edited_report_review
   -> assemble_report
 ```
 
-`agents/` 中当前有五个业务 Agent：
+`agents/` 中当前有六个业务 Agent：
 
 - `PlannerAgent`
 - `EvidenceResearchAgent`
 - `SectionWriterAgent`
 - `SectionReviewerAgent`
 - `ReportReviewerAgent`
+- `ChiefEditorAgent`
 
 Claim 模型抽取、确定性校验、局部修复和产物绑定属于
 `processors/claim_binding.py` 中的 `ClaimBindingProcessor`，不再注册为 Agent。
@@ -82,10 +85,11 @@ LangGraph 确定性编排器
 |-- SectionReviewerAgent
 |-- ClaimBindingProcessor
 |-- ReportReviewerAgent
+|-- ChiefEditorAgent
 `-- ReportAssembler
 ```
 
-目标是五个独立 Agent、一个 Claim Processor，以及继续由代码负责的编排、校验、
+目标是六个独立 Agent、一个 Claim Processor，以及继续由代码负责的编排、校验、
 报告装配和运行时基础设施。
 
 ## 迁移阶段
@@ -111,19 +115,21 @@ LangGraph 确定性编排器
      `agent_tool_started/completed/failed`；事件不包含参数、结果或异常原文。
    - **已完成：**提供只读安全 Trace API，只展示身份、轮次、状态、工具名、耗时、
      异常类型和用量摘要，不返回 Prompt、来源正文、local_state 或 handoff 内容。
-   - **已完成：**建立五个业务 Agent 的固定行为样本，统一检查身份、终态、轮次、
+   - **已完成：**建立六个业务 Agent 的固定行为样本，统一检查身份、终态、轮次、
      工具边界、引用、证据缺口和场景化的无依据确定性表述。
    - **已完成：**建立模型超时、检索超时、暂停、预算耗尽、依赖失败、Checkpoint 后
      崩溃恢复和过期执行栅栏的故障注入矩阵；详见 `docs/agent-evaluation.md`。
 9. **已完成：**将单章节执行封装为 `section_cycle` 子图，保持章节串行；验证
    Agent/Processor 交接、内部流式事件、暂停、崩溃和 SQLite 跨进程恢复。图拓扑升级为
    v5，v4 Checkpoint 明确拒绝恢复；`section_analyze` 兼容入口已删除。
-10. **已完成：**删除孤立旧工具链和失效配置，将仍有价值的测试迁移到当前
+10. **已完成：**增加 `ChiefEditorAgent`、稳定 Evidence Token、编辑后独立复审和
+    确定性引用渲染。父图升级为 v6，v5 及更早 Checkpoint 明确拒绝恢复。
+11. **已完成：**删除孤立旧工具链和失效配置，将仍有价值的测试迁移到当前
     `retrieval/` 边界。完整自动化回归结果为 230 passed、8 个需显式启用的 PostgreSQL
     集成测试 skipped；前端 DOM 契约 16 passed，Ruff 与补丁空白检查通过。
-11. **人工验收闸门：**按 `docs/manual-smoke-test.md` 验证真实服务、浏览器主流程、
+12. **人工验收闸门：**按 `docs/manual-smoke-test.md` 验证真实服务、浏览器主流程、
     暂停恢复和最终报告。人工验收通过前不改变章节调度方式。
-12. **后续候选优化：**只有人工验收通过后，才在依赖、预算、评测和执行栅栏约束下
+13. **后续候选优化：**只有人工验收通过后，才在依赖、预算、评测和执行栅栏约束下
     评估章节 DAG 并行；是否实施取决于串行基线的实际数据。
 
 每个阶段必须独立回归并汇报；后续阶段不得依赖未验证的中间状态。
@@ -131,9 +137,9 @@ LangGraph 确定性编排器
 ## Checkpoint 兼容策略
 
 - 早期只调整内部所有权时保持 `workflow_version=4`。
-- 章节子图改变了节点拓扑和 Checkpoint 命名空间，因此当前显式升级为
-  `workflow_version=5`。
-- v4 在途任务不得迁移到 v5 图中，恢复时会明确拒绝；用户需要创建新 Run。
+- 章节子图曾将版本从 v4 升级为 v5；主编编辑与编辑后复审节点进一步将当前版本升级为
+  `workflow_version=6`。
+- v5 及更早的在途任务不得迁移到 v6 图中，恢复时会明确拒绝；用户需要创建新 Run。
 - 版本升级必须明确选择迁移或拒绝恢复，不得静默重跑已有研究。
 
 ## 强制访问边界
@@ -160,13 +166,13 @@ LangGraph 确定性编排器
 - `ClaimBindingProcessor` 已独立于 Agent Registry；每次处理尝试仍保留原有图节点
   Checkpoint 边界。
 - Agent Runtime 内核已经建立，Planner、EvidenceResearch、SectionWriter、
-  SectionReviewer 和 ReportReviewer 均已接入；五个业务 Agent 的运行边界已经定型。
-  父图、`sections/subgraph.py` 和 v5 Checkpoint 是权威编排路径。
+  SectionReviewer、ReportReviewer 和 ChiefEditor 均已接入；六个业务 Agent 的运行边界
+  已经定型。父图、`sections/subgraph.py` 和 v6 Checkpoint 是权威编排路径。
 - Agent 执行事件和最新 `local_state`、`handoff`、`unresolved`、usage 已独立持久化到
   Run Repository。EvidenceResearchAgent 恢复时会创建新的 `agent_run_id`，链接上一条
  执行记录并加载安全 Checkpoint；LangGraph 节点 Checkpoint 仍是全局状态提交边界。
 - 旧 `tools/search.py`、`tools/knowledge.py` 和 `tools/support.py` 已由
   `retrieval/service.py` 与 `retrieval/normalization.py` 取代；仍有价值的测试已经迁移，
   旧实现和旧测试均已删除。
-- DAG 并行暂不实施。当前权威基线仍是 v5 父图加串行单章节子图，等待人工冒烟验收。
+- DAG 并行暂不实施。当前权威基线是 v6 父图加串行单章节子图，等待人工冒烟验收。
 - 当前大规模 Agent 角色迁移尚未提交 Git；提交或创建基线分支需要用户单独授权。

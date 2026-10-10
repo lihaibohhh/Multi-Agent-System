@@ -176,6 +176,41 @@ class AgentTraceEvent(BaseModel):
     occurred_at: datetime
 
 
+class UsageTotals(BaseModel):
+    """Call and token counters for one Run."""
+
+    model_calls: int = Field(default=0, ge=0)
+    retrieval_calls: int = Field(default=0, ge=0)
+    known_tokens: int = Field(default=0, ge=0)
+    charged_tokens: int = Field(default=0, ge=0)
+    unknown_model_calls: int = Field(default=0, ge=0)
+
+
+class StageUsage(BaseModel):
+    """Safe usage attribution; never contains prompts or tool parameters."""
+
+    kind: Literal["model", "retrieval", "unattributed"]
+    stage: str = Field(min_length=1, max_length=100)
+    scope: str = Field(default="", max_length=128)
+    calls: int = Field(default=0, ge=0)
+    known_tokens: int = Field(default=0, ge=0)
+    charged_tokens: int = Field(default=0, ge=0)
+    unknown_calls: int = Field(default=0, ge=0)
+
+
+class RunUsageSummary(BaseModel):
+    """Separate settled Run usage from its independent budget-account occupancy."""
+
+    run_id: str
+    budget_id: str | None = None
+    current: UsageTotals = Field(default_factory=UsageTotals)
+    budget: UsageTotals = Field(default_factory=UsageTotals)
+    stages: list[StageUsage] = Field(default_factory=list)
+    budget_scope: Literal["run"] = "run"
+    stage_attribution_complete: bool = True
+    history_incomplete: bool = False
+
+
 class RunSnapshot(BaseModel):
     run: RunRecord
     cursor: int = 0

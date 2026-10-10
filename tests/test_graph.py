@@ -14,6 +14,8 @@ def test_parent_graph_contains_one_chapter_subgraph_boundary() -> None:
         "plan_sections",
         "section_cycle",
         "report_review",
+        "chief_edit",
+        "edited_report_review",
         "assemble_report",
     }
     assert {"supervisor", "search_agent", "analyst_agent", "writer_agent"}.isdisjoint(
@@ -24,16 +26,24 @@ def test_parent_graph_contains_one_chapter_subgraph_boundary() -> None:
 def test_section_subgraph_owns_only_chapter_execution_nodes() -> None:
     graph = build_section_subgraph()
     assert set(graph.nodes) == set(SECTION_SUBGRAPH_NODES)
-    assert {"plan_sections", "report_review", "assemble_report"}.isdisjoint(graph.nodes)
+    assert {
+        "plan_sections",
+        "report_review",
+        "chief_edit",
+        "edited_report_review",
+        "assemble_report",
+    }.isdisjoint(graph.nodes)
 
 
 def test_initial_state_contains_only_current_workflow_fields() -> None:
     state = initial_state("测试研究问题")
     assert state["workflow_version"] == CURRENT_WORKFLOW_VERSION
-    assert CURRENT_WORKFLOW_VERSION == 5
+    assert CURRENT_WORKFLOW_VERSION == 6
     assert state["research_question"] == "测试研究问题"
     assert state["iteration_count"] == 0
     assert state["writer_status"] == "not_started"
+    assert state["edited_report"] is None
+    assert state["editorial_attempts"] == 0
     legacy = {
         "task_plan",
         "task_status",

@@ -25,8 +25,14 @@ def research_config(run_id: str, state: dict) -> dict:
 def _chapter_event(node: str, output: dict, run_id: str):
     if not isinstance(output, dict):
         return None
-    if node == "report_review":
+    if node in {"report_review", "edited_report_review"}:
         return "report_review", {"run_id": run_id, "report_review": output["report_review"]}
+    if node == "chief_edit":
+        return "report_edit", {
+            "run_id": run_id,
+            "editorial_attempts": output.get("editorial_attempts", 0),
+            "verdict": (output.get("edited_report") or {}).get("verdict"),
+        }
     if node == "assemble_report":
         return "report_ready", {"run_id": run_id, **_parse_writer(output)}
     if node not in {

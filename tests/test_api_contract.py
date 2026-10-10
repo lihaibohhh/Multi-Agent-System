@@ -19,6 +19,8 @@ def test_session_and_run_lifecycle_routes_are_exposed() -> None:
         "/api/runs/{run_id}/stream",
         "/api/runs/{run_id}/snapshot",
         "/api/runs/{run_id}/agent-trace",
+        "/api/runs/{run_id}/usage",
+        "/api/runs/{run_id}/report/reassemble",
         "/api/runs/{run_id}/sections/{section_id}/revisions",
     }
     assert expected <= set(paths)
@@ -33,6 +35,8 @@ def test_demo_is_served_from_standalone_static_assets() -> None:
     assert INDEX_FILE.is_file()
     assert (STATIC_DIR / "styles.css").is_file()
     assert (STATIC_DIR / "app.js").is_file()
+    assert 'id="usage-panel"' in INDEX_FILE.read_text(encoding="utf-8")
+    assert 'id="internal-audit"' in INDEX_FILE.read_text(encoding="utf-8")
     assert any(getattr(route, "path", None) == "/" for route in app.routes)
     assert any(getattr(route, "path", None) == "/static" for route in app.routes)
 

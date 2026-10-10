@@ -226,6 +226,83 @@ input[readonly] {
   min-width: 0;
 }
 
+.usage-panel {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: rgba(7, 12, 18, 0.48);
+}
+
+.usage-panel.hidden {
+  display: none;
+}
+
+.usage-comparison {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.usage-scope {
+  display: grid;
+  gap: 4px;
+  padding: 10px;
+  border: 1px solid rgba(100, 168, 255, 0.28);
+  border-radius: 8px;
+}
+
+.usage-scope.budget-account {
+  border-color: rgba(248, 190, 74, 0.3);
+}
+
+.usage-scope span,
+.usage-scope small,
+.usage-note {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.usage-scope strong {
+  color: var(--text);
+  font-size: 15px;
+}
+
+.usage-note {
+  margin: 0;
+  line-height: 1.55;
+}
+
+.usage-details summary {
+  color: #aebccc;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.usage-stage-list {
+  display: grid;
+  gap: 6px;
+  margin-top: 9px;
+}
+
+.usage-stage-row {
+  display: grid;
+  grid-template-columns: minmax(110px, 1fr) auto;
+  gap: 10px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.025);
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.usage-stage-row strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
 .button-row {
   flex-wrap: wrap;
   margin-top: 15px;
@@ -530,6 +607,35 @@ input[readonly] {
   opacity: 0.7;
 }
 
+.internal-audit {
+  margin: 14px 20px 0;
+  border: 1px solid rgba(242, 189, 82, 0.3);
+  border-radius: 11px;
+  background: rgba(242, 189, 82, 0.035);
+}
+
+.internal-audit > summary {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 12px 14px;
+  color: #f0c86f;
+  cursor: pointer;
+}
+
+.internal-audit > summary small {
+  color: var(--muted);
+  font-weight: 400;
+}
+
+.internal-audit[open] > summary {
+  border-bottom: 1px solid var(--border);
+}
+
+.internal-audit .card-body + .card-body {
+  border-top: 1px solid var(--border);
+}
+
 .report {
   max-width: 1060px;
   padding: 26px clamp(20px, 4vw, 52px) 70px;
@@ -626,6 +732,10 @@ input[readonly] {
 
 @media (max-width: 450px) {
   .pipeline {
+    grid-template-columns: 1fr;
+  }
+
+  .usage-comparison {
     grid-template-columns: 1fr;
   }
 

@@ -1,7 +1,7 @@
 # 章节子图与恢复边界
 
-当前 `workflow_version=5` 将章节执行从父图的平铺节点收归到
-`sections/subgraph.py`。父图只管理规划、章节单元、全篇审校和报告装配：
+当前 `workflow_version=6` 延续由 `sections/subgraph.py` 管理章节执行。父图管理规划、
+章节单元、全篇审校、主编编辑、编辑后复审和报告渲染：
 
 ```text
 plan_sections
@@ -12,6 +12,8 @@ section_cycle（一次只处理当前章节）
       ├─ 下一章 ────────────────┐
       │                         │
       ├─ report_review          │
+      │    -> chief_edit        │
+      │    -> edited_report_review
       └─ assemble_report        │
                                 │
       ◀─────────────────────────┘
@@ -54,5 +56,5 @@ EvidenceResearchAgent 首轮只分析持久化证据；仍有缺口且预算允�
 - 暂停或崩溃后使用 `None` 输入恢复原子图任务，不重新规划章节；
 - 子图结束后父图才进入下一章、全篇审校或局部操作装配。
 
-图拓扑和 Checkpoint 命名空间已经变化，因此版本从 v4 升级到 v5。v4 在途任务会被明确
-拒绝恢复，不会被当作 v5 静默重跑。
+章节子图曾令版本从 v4 升级到 v5；主编编辑与编辑后复审节点令当前版本升级到 v6。
+v5 及更早的在途任务会被明确拒绝恢复，不会被当作 v6 静默重跑。

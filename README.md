@@ -4,7 +4,7 @@
 
 ## 当前架构
 
-当前代码包含 5 个业务角色模块：
+当前代码包含 6 个业务角色模块：
 
 | Agent | 职责 |
 |---|---|
@@ -13,6 +13,7 @@
 | `SectionWriterAgent` | 撰写或修订单章正文 |
 | `SectionReviewerAgent` | 审校单章支持关系、覆盖度与反证 |
 | `ReportReviewerAgent` | 审查全篇冲突、重复、范围和覆盖问题 |
+| `ChiefEditorAgent` | 在稳定证据边界内完成跨章节叙事编辑和最终报告整合 |
 
 这些模块使用共享 Agent Runtime，拥有独立执行身份、受限上下文、结构化契约、
 生命周期事件和局部 Checkpoint。EvidenceResearchAgent 拥有只读工具白名单和
@@ -40,7 +41,11 @@ ClaimBindingProcessor（非 Agent）
     ↓
 下一章节 / ReportReviewerAgent
     ↓
-确定性报告装配
+ChiefEditorAgent
+    ↓
+ReportReviewerAgent（编辑后独立复审）
+    ↓
+确定性引用渲染
 ```
 
 系统不包含模型驱动的 Supervisor。LangGraph 使用确定性路由管理状态转换、预算、
@@ -57,20 +62,24 @@ ClaimBindingProcessor（非 Agent）
 - `runs/`：Run 状态机、持久化仓储和后台执行。
 - `knowledge/`：knowledge-service 的窄 HTTP 客户端。
 
-`workflow.py` 只负责编排：更新章节状态、保存局部成果并选择下一节点。
-Prompt 和模型调用属于对应 Agent 或 Processor；确定性业务规则属于 `sections`
-和 `processors`。
+`sections/nodes/` 负责把 LangGraph 节点调用适配成一次应用用例；上下文投影、
+请求构造、状态转换、路由策略和报告装配分别位于独立模块。`workflow.py` 仅保留
+旧导入路径和测试替换点的兼容门面。Prompt 和模型调用属于对应 Agent 或 Processor；
+确定性业务规则属于 `sections` 和 `processors`。
 
 `agents/spec.py`、`agents/context.py`、`agents/events.py` 和 `agents/runtime.py`
-已经提供独立 Agent Runtime 内核；五个业务 Agent 均已接入。Agent 执行记录、生命周期
+已经提供独立 Agent Runtime 内核；六个业务 Agent 均已接入。Agent 执行记录、生命周期
 事件及受限 JSON Checkpoint 已保存到 Run Repository，并受 execution_id 栅栏保护；
-LangGraph 已升级为 v5 父图加单章节子图。五个业务 Agent 已具备固定行为评测样本，模型超时、检索
+LangGraph 已升级为 v6 父图加单章节子图。六个业务 Agent 已具备固定行为评测样本，模型超时、检索
 超时、暂停、预算、依赖失败、Checkpoint 后崩溃恢复和过期执行已有故障注入基线。
 当前先完成旧链路清理和人工运行验收；只有人工验收通过后，才研究章节 DAG 并行。
 
 Agent 工具必须通过 Runtime 白名单以异步方式调用。只读 Trace 接口
 `GET /api/runs/{run_id}/agent-trace` 仅返回安全元数据；不会返回 Prompt、工具参数、
 检索结果、候选草稿或 Agent Checkpoint 内容。
+`GET /api/runs/{run_id}/usage` 将当前 Run 已确认用量与其独立预算账户占用分开返回，并提供
+不含 Prompt/工具参数的阶段级调用和 Token 汇总，避免把兄弟 Run 的历史消耗误算到
+当前章节。
 
 ## knowledge-service 边界
 
@@ -88,7 +97,7 @@ Agent 工具必须通过 Runtime 白名单以异步方式调用。只读 Trace �
 - 章节、草稿、已通过的 Claim 和检索回执可独立恢复。
 - 单条成功检索会持久化；同批其他查询失败时，恢复会复用成功结果。
 - Claim 修复保存已通过项，只重试 pending 项。
-- 当前状态版本为 `workflow_version=5`；v4 及更早的工作流 Checkpoint 不再支持。
+- 当前状态版本为 `workflow_version=6`；v5 及更早的工作流 Checkpoint 不再支持。
 - 每次 `section_cycle` 只处理一个章节，完成后回到父图固化产物，再进入下一章。
 - 子图暂停或失败时，父图保存 `section_cycle`，子图命名空间保存具体待恢复节点。
 
@@ -114,12 +123,14 @@ multi_agent_research/
 │   ├── section_writer_agent.py
 │   ├── section_reviewer_agent.py
 │   ├── report_reviewer_agent.py
+│   ├── chief_editor_agent.py
 │   ├── contracts.py
 │   ├── spec.py
 │   ├── context.py
 │   ├── events.py
 │   ├── runtime.py
-│   └── registry.py
+│   ├── registry.py
+│   └── bootstrap.py
 ├── processors/
 │   └── claim_binding.py
 ├── retrieval/
@@ -127,8 +138,21 @@ multi_agent_research/
 │   ├── normalization.py
 │   └── service.py
 ├── sections/
-│   ├── workflow.py
-│   ├── subgraph.py
+│   ├── workflow.py              # 旧调用面的薄兼容门面
+│   ├── subgraph.py              # 只描述章节节点、边和路由入口
+│   ├── nodes/                   # 每个 LangGraph 节点的一次应用用例
+│   │   ├── planning.py
+│   │   ├── research.py
+│   │   ├── writing.py
+│   │   ├── review.py
+│   │   ├── report.py
+│   │   └── editorial.py
+│   ├── context_builder.py       # 有界父任务、前章和证据上下文
+│   ├── request_factory.py       # ResearchState 到 Agent 请求的类型化投影
+│   ├── transitions.py           # Agent/Processor 结果到状态增量
+│   ├── policies.py              # 重试、状态和下一节点的确定性规则
+│   ├── editorial.py             # 稳定 Evidence Token 与最终引用渲染
+│   ├── report_assembler.py      # 最终报告校验与渲染入口
 │   ├── models.py
 │   ├── validation.py
 │   ├── claim_repair.py

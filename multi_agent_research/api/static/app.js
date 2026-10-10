@@ -5,6 +5,16 @@ const TERMINAL = new Set(["completed", "failed", "interrupted", "cancelled", "pa
 const RESUMABLE = new Set(["failed", "interrupted", "paused", "budget_limited"]);
 const AGENTS = ["planner", "evidence-research", "section-writer", "section-reviewer", "report-reviewer"];
 const PROCESSORS = ["claim-binding"];
+const USAGE_STAGE_LABELS = {
+  plan_sections: "Planner · 章节规划",
+  section_search: "Evidence Research · 证据研究",
+  section_write: "Section Writer · 章节写作",
+  section_review: "Section Reviewer · 章节审校",
+  section_claims: "Claim Binding · 抽取与修复",
+  report_review: "Report Reviewer · 全篇审校",
+  retrieval: "Retrieval Service · 只读检索",
+  unattributed: "历史/未归属调用",
+};
 
 const state = {
   source: null,
@@ -15,6 +25,8 @@ const state = {
   receivedTerminal: false,
   cursor: 0,
   viewRequest: 0,
+  usageRunId: null,
+  usageTimer: null,
 };
 
 async function api(path, options = {}) {
@@ -71,6 +83,7 @@ function closeStream() {
 function resetPipeline() {
   renderSections([]);
   renderReportReview(null);
+  $("internal-audit").open = false;
   for (const name of AGENTS) $("agent-" + name).className = "agent";
   for (const name of PROCESSORS) $("processor-" + name).className = "agent processor";
   $("meta-planner").textContent = "章节规划";
@@ -142,7 +155,7 @@ function renderSections(sections = []) {
       const runId = state.currentRun.run_id;
       const panel = document.createElement("div");
       const description = document.createElement("p");
-      description.textContent = `局部操作创建子 Run，共用累计预算，不改原 Run。依赖本章的章节可能需更新。候选证据：${(section.results || []).length} 条。`;
+      description.textContent = `局部操作创建独立预算的子 Run，不改原 Run。依赖本章的章节可能需更新。候选证据：${(section.results || []).length} 条。`;
       const instruction = document.createElement("textarea");
       instruction.maxLength = 2000;
       instruction.placeholder = "说明本次继续/补证据/刷新要求（至少 5 字）";
@@ -185,13 +198,21 @@ function renderSections(sections = []) {
     return details;
   });
   $("sections-list").replaceChildren(...nodes);
+  updateAuditVisibility();
 }
 
 function renderReportReview(review) {
   const node = $("report-review");
   node.classList.toggle("hidden", !review);
   node.style.whiteSpace = "pre-wrap";
-  node.textContent = review ? `全篇一致性审校：${review.verdict === "pass" ? "未发现冲突（模型判断）" : "存在待解决问题"}\n${review.summary || ""}\n${(review.issues || []).map(issue => `${issue.section_ids.join(", ")} · ${issue.kind}: ${issue.detail}`).join("\n")}` : "";
+  node.textContent = review ? `内部全篇一致性审校：${review.verdict === "pass" ? "未发现冲突（模型判断）" : "存在待解决问题"}\n${review.summary || ""}\n${(review.issues || []).map(issue => `${issue.section_ids.join(", ")} · ${issue.kind}: ${issue.detail}`).join("\n")}` : "";
+  updateAuditVisibility();
+}
+
+function updateAuditVisibility() {
+  const hasSections = $("sections-list").children.length > 0;
+  const hasReview = Boolean($("report-review").textContent);
+  $("internal-audit").classList.toggle("hidden", !hasSections && !hasReview);
 }
 
 function setAgent(name, status, detail) {
@@ -341,6 +362,7 @@ async function createSession() {
 }
 
 function updateRunActions(run) {
+  if (!run) renderUsage(null);
   renderBudget(run?.budget);
   const completed = run?.status === "completed" && (run.sections || []).every(s => ["complete", "limited"].includes(s.status));
   const resumable = run && RESUMABLE.has(run.status);
@@ -349,6 +371,7 @@ function updateRunActions(run) {
   $("start-existing-btn").classList.toggle("hidden", run?.status !== "created");
   $("continue-btn").classList.toggle("hidden", !completed);
   $("use-as-parent-btn").classList.toggle("hidden", !completed);
+  $("reassemble-btn").classList.toggle("hidden", !completed || !run?.report_review);
   $("resume-btn").classList.toggle("hidden", !resumable);
   const policy = run?.budget?.policy;
   const exhausted = policy && (run.budget.charged_tokens >= policy.tokens ||
@@ -360,7 +383,7 @@ function updateRunActions(run) {
   $("pause-btn").textContent = run?.pause_requested ? "正在暂停…" : "暂停研究";
   $("migrate-budget-btn").classList.toggle("hidden", !legacy || run?.status === "running");
   $("increase-budget-btn").classList.toggle("hidden", !run || legacy || run.status === "running");
-  if (run?.budget_id) $("run-budget").textContent += ` 预算账户：${run.budget_id}（同研究子 Run 共用）。`;
+  if (run?.budget_id) $("run-budget").textContent += ` 独立预算账户：${run.budget_id}（仅属于当前 Run）。`;
   if (run?.status === "budget_limited" || exhausted) $("run-budget").textContent += " 预算不足，普通继续不会增加额度。";
   if (policy && run.budget.retrieval_calls >= policy.retrieval_calls) $("run-budget").textContent += " 检索额度已满，只能复用已保存结果，不能发起新检索。";
   $("copy-btn").classList.toggle("hidden", !state.reportText);
@@ -373,11 +396,83 @@ function renderBudget(budget) {
   const policy = budget.policy;
   const unknown = budget.unknown_model_calls ?? Object.values(budget.reservations || {})
     .filter(entry => entry.kind === "model" && entry.status === "unknown").length;
-  node.textContent = `已保存预算：模型 ${budget.model_calls}/${policy.model_calls} 次 · 检索 ${budget.retrieval_calls}/${policy.retrieval_calls} 次 · Token 占用 ${budget.charged_tokens}/${policy.tokens}（已知 ${budget.known_tokens}，${unknown} 次用量待确认）`;
+  node.textContent = `当前 Run 独立预算：模型 ${budget.model_calls}/${policy.model_calls} 次 · 检索 ${budget.retrieval_calls}/${policy.retrieval_calls} 次 · Token ${budget.charged_tokens}/${policy.tokens}（已知 ${budget.known_tokens}，${unknown} 次用量待确认）`;
   node.textContent += budget.version === 2
     ? ` · 每次执行最多 ${Math.round(policy.wall_seconds / 60)} 分钟；跨天继续重新计时，累计费用不清零。`
     : " · 旧版绝对截止策略：需明确确认迁移后才能继续。";
   if (budget.legacy_history_incomplete) node.textContent += " 历史调用统计不完整。";
+}
+
+function formatCount(value) {
+  return Number(value || 0).toLocaleString("zh-CN");
+}
+
+function renderUsage(usage) {
+  const panel = $("usage-panel");
+  if (!usage) {
+    state.usageRunId = null;
+    panel.classList.add("hidden");
+    $("usage-stage-list").replaceChildren();
+    return;
+  }
+  state.usageRunId = usage.run_id;
+  panel.classList.remove("hidden");
+  const current = usage.current || {};
+  const budget = usage.budget || {};
+  $("usage-current-tokens").textContent = `${formatCount(current.charged_tokens)} Token`;
+  $("usage-current-calls").textContent = `模型 ${formatCount(current.model_calls)} 次 · 检索 ${formatCount(current.retrieval_calls)} 次 · 已知 ${formatCount(current.known_tokens)}`;
+  $("usage-budget-tokens").textContent = `${formatCount(budget.charged_tokens)} Token`;
+  $("usage-budget-calls").textContent = `模型 ${formatCount(budget.model_calls)} 次 · 检索 ${formatCount(budget.retrieval_calls)} 次`;
+  const notes = ["左侧是模型返回的已确认用量；右侧是当前 Run 独立账户的预算占用，执行中还可能包含待结算预留。"];
+  if (current.unknown_model_calls) notes.push(`当前有 ${current.unknown_model_calls} 次模型调用用量待确认。`);
+  if (!usage.stage_attribution_complete) notes.push("部分历史模型用量缺少阶段标签，已列入“历史/未归属调用”。");
+  if (usage.history_incomplete) notes.push("当前 Run 包含迁移前历史，阶段明细可能少于预算账户累计。");
+  $("usage-note").textContent = notes.join(" ");
+
+  const rows = (usage.stages || []).map((stage) => {
+    const row = document.createElement("div");
+    row.className = "usage-stage-row";
+    const label = document.createElement("span");
+    const scope = stage.scope && stage.scope !== "legacy_or_missing_ledger" ? ` · ${stage.scope}` : "";
+    label.textContent = `${USAGE_STAGE_LABELS[stage.stage] || stage.stage}${scope}`;
+    const value = document.createElement("strong");
+    value.textContent = stage.kind === "retrieval"
+      ? `${formatCount(stage.calls)} 次检索`
+      : `${formatCount(stage.known_tokens)} Token · ${formatCount(stage.calls)} 次`;
+    if (stage.unknown_calls) value.title = `${stage.unknown_calls} 次用量待确认；占用按预留值计算`;
+    row.append(label, value);
+    return row;
+  });
+  if (!rows.length) {
+    const empty = document.createElement("div");
+    empty.className = "usage-stage-row";
+    empty.textContent = "当前 Run 尚未产生模型或检索调用。";
+    rows.push(empty);
+  }
+  $("usage-stage-list").replaceChildren(...rows);
+  if (!$("stats").classList.contains("hidden")) {
+    $("stat-tokens").textContent = formatCount(current.known_tokens);
+  }
+}
+
+async function refreshUsage(runId, request = state.viewRequest) {
+  try {
+    const usage = await api(`/api/runs/${encodeURIComponent(runId)}/usage`);
+    if (request !== state.viewRequest || state.currentRun?.run_id !== runId) return;
+    renderUsage(usage);
+  } catch (error) {
+    if (request === state.viewRequest && state.currentRun?.run_id === runId) {
+      $("usage-note").textContent = `用量明细暂时不可用：${error.message}`;
+    }
+  }
+}
+
+function scheduleUsageRefresh() {
+  if (!state.currentRun) return;
+  window.clearTimeout(state.usageTimer);
+  const runId = state.currentRun.run_id;
+  const request = state.viewRequest;
+  state.usageTimer = window.setTimeout(() => refreshUsage(runId, request), 120);
 }
 
 function clearReport() {
@@ -389,6 +484,7 @@ function clearReport() {
   $("copy-btn").classList.add("hidden");
   $("report-title").textContent = "研究报告";
   $("report-subtitle").textContent = "选择历史 Run 或启动新任务。";
+  $("internal-audit").open = false;
 }
 
 function sanitizeMarkup(html) {
@@ -448,6 +544,7 @@ function syncRunTree() {
 async function openRun(runId) {
   const request = ++state.viewRequest;
   closeStream();
+  renderUsage(null);
   setNotice();
   resetPipeline();
   try {
@@ -468,6 +565,7 @@ async function openRun(runId) {
     const partial = run.parent_context?.section_operation && (run.sections || []).some(s => !["complete", "limited"].includes(s.status));
     $("report-title").textContent = `${partial ? "章节阶段产物" : "研究报告"} · ${shortId(run.run_id)}`;
     updateRunActions(run);
+    await refreshUsage(run.run_id, request);
     syncRunTree();
     $("event-cursor").textContent = `snapshot #${snapshot.cursor}`;
     if (run.error_message) setNotice(run.error_message, "error");
@@ -526,6 +624,7 @@ function handleRunEvent(type, event) {
   if (data.budget && state.currentRun) {
     state.currentRun.budget = data.budget;
     renderBudget(data.budget);
+    scheduleUsageRefresh();
   }
 
   if (data.sections) {
@@ -713,7 +812,7 @@ function prepareContinuation() {
   state.currentRun = null;
   updateRunActions(null);
   renderRunTree();
-  setNotice("已选定父 Run。子 Run 不覆写父报告，但共用该研究的累计预算；独立研究请使用空白 Run。", "success");
+  setNotice("已选定父 Run。子 Run 不覆写父报告，并将获得独立预算账户；研究产物仍按选择范围继承。", "success");
   $("question").focus();
 }
 
@@ -772,7 +871,7 @@ async function increaseCurrentBudget() {
   const reason = window.prompt("请填写追加原因（至少 5 字，将保存在审计记录中）：");
   if (reason === null) return;
   if (reason.trim().length < 5 || reason.length > 500) { setNotice("原因需 5–500 字。", "error"); return; }
-  if (!window.confirm(`确认同研究共享额度 ${expected} → ${total}（增加 ${total - expected}）？消耗与未知预留不变，不自动恢复。`)) return;
+  if (!window.confirm(`确认当前 Run 独立额度 ${expected} → ${total}（增加 ${total - expected}）？消耗与未知预留不变，不自动恢复。`)) return;
   const key = JSON.stringify([run.run_id, expected, total, reason.trim()]);
   // Retain the same key after an uncertain network response; CAS also blocks stale retries.
   if (state.budgetIncrease?.key !== key) state.budgetIncrease = {key, id: crypto.randomUUID()};
@@ -783,7 +882,7 @@ async function increaseCurrentBudget() {
         expected_tokens:expected, new_tokens:total, reason:reason.trim()}),
     });
     if (state.currentRun?.run_id === run.run_id) await openRun(run.run_id);
-    setNotice("共享 Token 上限已追加，历史消耗不变。尚未启动，请单独选择恢复。", "success");
+    setNotice("当前 Run Token 上限已追加，历史消耗不变。尚未启动，请单独选择恢复。", "success");
   } catch (error) { setNotice(error.message, "error"); }
   finally { $("increase-budget-btn").disabled = false; }
 }
@@ -795,6 +894,29 @@ async function copyReport() {
     setNotice("报告已复制到剪贴板。", "success");
   } catch {
     setNotice("浏览器未授予剪贴板权限。", "error");
+  }
+}
+
+async function reassembleCurrentReport() {
+  const run = state.currentRun;
+  if (!run || run.status !== "completed") return;
+  const button = $("reassemble-btn");
+  button.disabled = true;
+  try {
+    const updated = await api(`/api/runs/${encodeURIComponent(run.run_id)}/report/reassemble`, {
+      method: "POST",
+    });
+    state.currentRun = updated;
+    renderReport(updated.final_report, { model_usage: updated.model_usage });
+    renderSections(updated.sections || []);
+    renderReportReview(updated.report_review);
+    updateRunActions(updated);
+    syncRunTree();
+    setNotice("报告已按公开展示规则重新装配；未调用模型或检索，内部审计仍保留在折叠区域。", "success");
+  } catch (error) {
+    setNotice(error.message, "error");
+  } finally {
+    button.disabled = false;
   }
 }
 
@@ -828,6 +950,7 @@ $("pause-btn").addEventListener("click", pauseCurrentRun);
 $("migrate-budget-btn").addEventListener("click", migrateCurrentBudget);
 $("increase-budget-btn").addEventListener("click", increaseCurrentBudget);
 $("copy-btn").addEventListener("click", copyReport);
+$("reassemble-btn").addEventListener("click", reassembleCurrentReport);
 $("clear-parent-btn").addEventListener("click", () => { $("parent-run-id").value = ""; });
 window.addEventListener("beforeunload", closeStream);
 

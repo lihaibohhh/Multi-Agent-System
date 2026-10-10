@@ -21,6 +21,7 @@ from ..runs.models import (
     AgentTraceEvent,
     RunCreateRequest,
     RunRecord,
+    RunUsageSummary,
     RunSnapshot,
     SessionCreateRequest,
     SessionRecord,
@@ -146,7 +147,7 @@ async def create_session(request: SessionCreateRequest):
 
 
 @app.post("/api/runs/{run_id}/budget/increase", response_model=RunRecord,
-          summary="明确追加共享 Token 上限；累计消耗不变、不自动恢复")
+    summary="明确追加当前 Run 的独立 Token 上限；累计消耗不变、不自动恢复")
 async def increase_run_budget(run_id: str, request: BudgetIncreaseRequest):
     try:
         return await run_service.increase_run_budget(run_id, **request.model_dump())
@@ -201,6 +202,30 @@ async def get_run(run_id: str):
 
 
 @app.post(
+    "/api/runs/{run_id}/report/reassemble",
+    response_model=RunRecord,
+    summary="以已保存的审校章节重新装配公开报告（不调用模型或检索）",
+)
+async def reassemble_run_report(run_id: str):
+    try:
+        return await run_service.reassemble_report(run_id)
+    except (RunConflictError, RunNotFoundError, ValueError) as exc:
+        raise _run_http_error(exc) from exc
+
+
+@app.get(
+    "/api/runs/{run_id}/usage",
+    response_model=RunUsageSummary,
+    summary="读取当前 Run 已确认用量、独立预算占用及阶段明细",
+)
+async def get_run_usage(run_id: str):
+    try:
+        return await run_service.get_run_usage(run_id)
+    except RunNotFoundError as exc:
+        raise _run_http_error(exc) from exc
+
+
+@app.post(
     "/api/runs/{run_id}/sections/{section_id}/revisions",
     response_model=RunRecord,
     status_code=status.HTTP_201_CREATED,
@@ -229,7 +254,7 @@ async def start_run(run_id: str):
 
 
 @app.post("/api/runs/{run_id}/sections/{section_id}/operations", response_model=RunRecord,
-          status_code=status.HTTP_201_CREATED, summary="创建选章继续/仅补证据/刷新来源操作（共预算，另行启动）")
+          status_code=status.HTTP_201_CREATED, summary="创建选章继续/仅补证据/刷新来源操作（独立预算，另行启动）")
 async def create_section_operation(run_id: str, section_id: str, request: SectionOperationRequest):
     try:
         return await run_service.create_section_operation(run_id, section_id, mode=request.mode,

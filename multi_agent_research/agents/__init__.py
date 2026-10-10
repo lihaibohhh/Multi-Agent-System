@@ -7,6 +7,7 @@ from .context import (
     create_resumable_agent_context,
 )
 from .contracts import (
+    ChiefEditorRequest,
     EvidenceResearchRequest,
     EvidenceResearchResult,
     ReportReviewRequest,
@@ -15,6 +16,7 @@ from .contracts import (
     SectionWritingRequest,
     SectionWritingResult,
 )
+from .chief_editor_agent import ChiefEditorAgent
 from .evidence_research_agent import EvidenceResearchAgent
 from .events import (
     AgentEvent,
@@ -59,6 +61,8 @@ __all__ = [
     "AgentToolUnavailableError",
     "AgentTurnLimitError",
     "AgentTurnResult",
+    "ChiefEditorAgent",
+    "ChiefEditorRequest",
     "EvidenceResearchRequest",
     "EvidenceResearchResult",
     "EvidenceResearchAgent",

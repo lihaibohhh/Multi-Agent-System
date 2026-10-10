@@ -15,6 +15,8 @@ test('pipeline distinguishes five role agents from Claim processor and retrieval
   assert.doesNotMatch(html, /id="agent-(?:supervisor|search|analyst|writer)"/);
   assert.match(html, /非 Agent：Claim Binding Processor/);
   assert.match(html, /非 Agent：Retrieval Service/);
+  assert.match(html, /id="internal-audit"/);
+  assert.match(html, /不属于正式报告正文/);
 });
 
 function setup() {
@@ -44,7 +46,7 @@ function setup() {
   const context = vm.createContext({
     document, URLSearchParams, location: { search: '' },
     localStorage: { getItem() { return null; } },
-    window: { addEventListener() {}, setTimeout() {} },
+    window: { addEventListener() {}, setTimeout() {}, clearTimeout() {} },
     fetch: async () => ({ ok: true, text: async () => '{"status":"ok"}' }),
     EventSource: class {
       constructor(url) { this.url = url; this.handlers = {}; this.closed = false; }
@@ -120,11 +122,33 @@ test('budget view distinguishes reservations from known usage and clears on a ne
     model_calls:3,retrieval_calls:2,charged_tokens:9000,known_tokens:1000,deadline:2000000000,
     unknown_model_calls:1,legacy_history_incomplete:true});`, context);
   assert.match(nodes.get('run-budget').textContent, /模型 3\/10/);
-  assert.match(nodes.get('run-budget').textContent, /占用 9000\/10000（已知 1000，1 次/);
+  assert.match(nodes.get('run-budget').textContent, /Token 9000\/10000（已知 1000，1 次/);
   assert.match(nodes.get('run-budget').textContent, /需明确确认迁移/);
   assert.match(nodes.get('run-budget').textContent, /历史调用统计不完整/);
   vm.runInContext('updateRunActions(null)', context);
   assert.equal(nodes.get('run-budget').textContent, '');
+});
+
+test('usage view separates confirmed usage from independent budget occupancy', () => {
+  const { context, nodes } = setup();
+  context.usage = {
+    run_id: 'current', budget_scope: 'run', stage_attribution_complete: true,
+    history_incomplete: false,
+    current: {model_calls: 9, retrieval_calls: 8, known_tokens: 81450, charged_tokens: 81450},
+    budget: {model_calls: 9, retrieval_calls: 8, known_tokens: 81450, charged_tokens: 81450},
+    stages: [
+      {kind:'model',stage:'section_write',scope:'section_1',calls:2,known_tokens:25208,unknown_calls:0},
+      {kind:'retrieval',stage:'retrieval',scope:'knowledge',calls:4,known_tokens:0,unknown_calls:0},
+    ],
+  };
+  vm.runInContext('renderUsage(usage)', context);
+  assert.equal(nodes.get('usage-current-tokens').textContent, '81,450 Token');
+  assert.match(nodes.get('usage-current-calls').textContent, /模型 9 次 · 检索 8 次/);
+  assert.equal(nodes.get('usage-budget-tokens').textContent, '81,450 Token');
+  assert.match(nodes.get('usage-budget-calls').textContent, /模型 9 次 · 检索 8 次/);
+  assert.equal(nodes.get('usage-stage-list').children.length, 2);
+  assert.match(nodes.get('usage-stage-list').children[0].children[0].textContent, /Section Writer.*section_1/);
+  assert.match(nodes.get('usage-stage-list').children[0].children[1].textContent, /25,208 Token · 2 次/);
 });
 
 test('v2 pause/resume controls preserve cumulative quota and explain migration', () => {
@@ -232,6 +256,20 @@ test('SSE done enables revision and renders final review; running snapshots do n
   vm.runInContext('handleRunEvent("done", event)', context);
   assert.equal(nodes.get('sections-list').children[0].children.length, 5);
   assert.match(nodes.get('report-review').textContent, /年份口径冲突/);
+  assert.match(nodes.get('report-review').textContent, /内部全篇一致性审校/);
+});
+
+test('completed report can be deterministically reassembled without starting research', async () => {
+  const { context, nodes } = setup();
+  context.fixture = section;
+  context.calls = [];
+  vm.runInContext(`state.currentRun={run_id:'done',status:'completed',sections:[fixture],report_review:{verdict:'pass'}};
+    api=async (path,options)=>{calls.push({path,options});return {...state.currentRun,final_report:'# 已整理'};};
+    syncRunTree=()=>{};`, context);
+  await vm.runInContext('reassembleCurrentReport()', context);
+  assert.equal(context.calls[0].path, '/api/runs/done/report/reassemble');
+  assert.equal(context.calls[0].options.method, 'POST');
+  assert.match(nodes.get('notice').textContent, /未调用模型或检索/);
 });
 
 test('resume starts after snapshot cursor and ignores historical terminal events', () => {

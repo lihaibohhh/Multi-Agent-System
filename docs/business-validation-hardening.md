@@ -42,7 +42,7 @@
 
 ## 回归与使用
 
-测试覆盖真实 LangChain/Pydantic 解析链（仅替换 HTTP 服务）、混合错误共享预算、不可纠正错误、错误聚合、引文还原与拒绝不安全匹配、动态章节约束、正文引用、全篇审校。另有完整 RunService + LangGraph + SQLite 测试：第二章耗尽校验重试，第一章和已写草稿保留；关闭并重新打开 Checkpoint，恢复后完成全部章节和报告装配。模型与检索为替身，不等同于真实模型全报告质量验收。
+测试覆盖真实 LangChain/Pydantic 解析链（仅替换 HTTP 服务）、混合错误下的同 Run 预算、不可纠正错误、错误聚合、引文还原与拒绝不安全匹配、动态章节约束、正文引用、全篇审校。另有完整 RunService + LangGraph + SQLite 测试：第二章耗尽校验重试，第一章和已写草稿保留；关闭并重新打开 Checkpoint，恢复后完成全部章节和报告装配。模型与检索为替身，不等同于真实模型全报告质量验收。
 
 ```powershell
 conda run -n multi-agent python -m pytest -q

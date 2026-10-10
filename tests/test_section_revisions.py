@@ -198,7 +198,10 @@ async def test_report_conflicts_are_visible_and_cannot_be_labeled_reviewed(monke
     result = await build_graph().ainvoke(state, streaming.research_config("conflict", state))
     assert result["report_review"]["verdict"] == "revise"
     assert result["report_quality"] == "limited"
-    assert "两章年份口径不一致" in result["final_report"]
+    assert "两章年份口径不一致" in result["report_review"]["issues"][0]["detail"]
+    assert "两章年份口径不一致" not in result["final_report"]
+    assert "全篇审校待解决问题" not in result["final_report"]
+    assert "阅读提示" in result["final_report"]
 
 
 @pytest.mark.asyncio

@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import Literal, TypedDict
 
 
-CURRENT_WORKFLOW_VERSION = 5
+CURRENT_WORKFLOW_VERSION = 6
 
 
 def format_parent_context(state: ResearchState, *, max_chars: int = 4_000) -> str:
@@ -36,6 +36,8 @@ class ResearchState(TypedDict):
     section_step: str
     report_quality: str
     report_review: dict | None
+    edited_report: dict | None
+    editorial_attempts: int
     model_calls: int
     usage_unknown_calls: int
 
@@ -62,6 +64,8 @@ def initial_state(question: str, parent_context: dict | None = None) -> Research
         section_step="plan",
         report_quality="pending",
         report_review=None,
+        edited_report=None,
+        editorial_attempts=0,
         model_calls=0,
         usage_unknown_calls=0,
         iteration_count=0,

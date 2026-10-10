@@ -18,7 +18,7 @@ pytestmark = pytest.mark.skipif(os.getenv('RUN_POSTGRES_TESTS') != '1', reason='
 
 
 @pytest.mark.asyncio
-async def test_increase_is_atomic_idempotent_shared_and_preserves_usage():
+async def test_increase_is_atomic_idempotent_run_scoped_and_preserves_usage():
     async with await AsyncConnection.connect(settings.database.url, autocommit=True, row_factory=dict_row) as conn:
         schema = 'increase_test_' + uuid4().hex
         async with conn.transaction(force_rollback=True):
@@ -52,7 +52,8 @@ async def test_increase_is_atomic_idempotent_shared_and_preserves_usage():
             assert after.budget['known_tokens'] == 123 and after.budget['charged_tokens'] == 523
             assert after.status == RunStatus.PAUSED and after.error_message is None
             assert after.execution_id == before.execution_id
-            assert (await repo.get_run('child')).budget['policy'] == after.budget['policy']
+            child = await repo.get_run('child')
+            assert child.budget['policy']['tokens'] != after.budget['policy']['tokens']
             assert len([e for e in await repo.list_events('root') if e.event_type == 'budget_increased']) == 1
             with pytest.raises(RunConflictError):
                 await repo.increase_run_budget('root', payload.model_copy(update={'request_id':'another-request'}))
